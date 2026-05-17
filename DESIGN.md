@@ -22,6 +22,7 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
 ## Game Modes
 - **Audio Spelling:** Hear a word (mp3), spell it
 - **Visual Spelling:** See an image, spell the word
+    - Initial test uses 100x100 pixel .bmp files
 - **Multiple Choice:** Select correct spelling from options
 
 ## Development Plan
