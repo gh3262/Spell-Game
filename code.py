@@ -10,6 +10,7 @@ import adafruit_bitmap_font.bitmap_font as bitmap_font
 import sdcardio
 import storage
 import json
+import os
 from adafruit_display_text import label
 from adafruit_displayio_layout.layouts.page_layout import PageLayout
 from xpt2046_circuitpython.exceptions import ReadFailedException
@@ -23,15 +24,16 @@ TFT_BACKLIGHT = board.D6
 # Touch controller chip-select pin.
 TOUCH_CS = board.D5
 
-# SD card chip-select pin.
+# SD card socket chip-select pin.
 SD_CS = board.D25
 
-# SPI flash breakout chip-select pin (reserved, not yet supported).
+# SPI flash breakout chip-select pin (reserved, not currently mounted).
 FLASH_CS = board.D12
 
 DISPLAY_WIDTH = 480
 DISPLAY_HEIGHT = 320
 DISPLAY_ROTATION = 180
+DISPLAY_SPI_BAUDRATE = 12000000
 
 # Touch orientation tuning.
 TOUCH_SWAP_XY = True
@@ -41,8 +43,10 @@ TOUCH_INVERT_Y = False
 BG_COLOR = 0x101820
 BUTTON_FILL_COLOR = 0x1F4E79
 BUTTON_TEXT_COLOR = 0xFFFFFF
+VOWEL_TEXT_COLOR = 0xFFD400
 STATUS_TEXT_COLOR = 0xD0D7DE
 TITLE_TEXT_COLOR = 0xFFFFFF
+DARK_PANEL_COLOR = 0x2B2B2B
 
 FLOW_BUTTON_WIDTH = 92
 FLOW_BUTTON_HEIGHT = 34
@@ -60,6 +64,10 @@ KEYBOARD_TOTAL_HEIGHT = (KEYBOARD_ROWS * KEY_HEIGHT) + ((KEYBOARD_ROWS - 1) * KE
 KEYBOARD_START_X = (DISPLAY_WIDTH - KEYBOARD_TOTAL_WIDTH) // 2
 KEYBOARD_START_Y = DISPLAY_HEIGHT - KEYBOARD_TOTAL_HEIGHT - 32
 
+IMAGE_PANEL_SIZE = 100
+IMAGE_PANEL_MARGIN_RIGHT = 5
+IMAGE_PANEL_TOP_OFFSET_FROM_FLOW = 6
+
 FONT_PATHS = {
     "button": "/fonts/ComicSansMS-19.pcf",
     "small_button": "/fonts/ComicSansMS-15.pcf",
@@ -75,6 +83,12 @@ answer_display_label = None
 answer_display_text = ""
 sd_card = None
 sd_vfs = None
+keyboard_page_group = None
+keyboard_image_index = 0
+keyboard_image_tile = None
+keyboard_image_bitmap = None
+keyboard_image_file = None
+keyboard_image_paths = []
 TEST_FILE_PATH = "/sd/test.txt"
 
 STATS_FILE_PATH = "/sd/stats.json"
@@ -101,6 +115,113 @@ def load_fonts():
         FONTS[font_key] = bitmap_font.load_font(FONT_PATHS[font_key])
 
 
+def refresh_answer_display():
+    if answer_display_label is not None:
+        answer_display_label.text = answer_display_text if answer_display_text else "_"
+
+
+def clear_answer_text():
+    global answer_display_text
+    answer_display_text = ""
+    refresh_answer_display()
+
+
+def load_keyboard_image_paths(folder_path="/img"):
+    global keyboard_image_paths, keyboard_image_index
+
+    try:
+        names = os.listdir(folder_path)
+    except Exception as exc:
+        keyboard_image_paths = []
+        keyboard_image_index = 0
+        print("Image folder read failed for {}: {}".format(folder_path, exc))
+        return False
+
+    bmp_names = []
+    for name in names:
+        lower_name = name.lower()
+        if lower_name.endswith(".bmp"):
+            bmp_names.append(name)
+
+    bmp_names.sort()
+    keyboard_image_paths = ["{}/{}".format(folder_path, name) for name in bmp_names]
+    keyboard_image_index = 0
+
+    if not keyboard_image_paths:
+        print("No BMP images found in {}".format(folder_path))
+        return False
+
+    print("Loaded {} keyboard images from {}".format(len(keyboard_image_paths), folder_path))
+    for image_path in keyboard_image_paths:
+        print("  {}".format(image_path))
+    return True
+
+
+def current_image_answer():
+    if not keyboard_image_paths:
+        return ""
+
+    image_path = keyboard_image_paths[keyboard_image_index]
+    image_name = image_path.split("/")[-1]
+    dot_index = image_name.rfind(".")
+    if dot_index > 0:
+        return image_name[:dot_index].lower()
+    return image_name.lower()
+
+
+def update_keyboard_panel_image():
+    global keyboard_image_tile, keyboard_image_bitmap, keyboard_image_file
+
+    if keyboard_page_group is None or not keyboard_image_paths:
+        return False
+
+    if keyboard_image_tile is not None:
+        try:
+            keyboard_page_group.remove(keyboard_image_tile)
+        except Exception:
+            pass
+        keyboard_image_tile = None
+
+    if keyboard_image_file is not None:
+        try:
+            keyboard_image_file.close()
+        except Exception:
+            pass
+        keyboard_image_file = None
+
+    keyboard_image_bitmap = None
+
+    image_path = keyboard_image_paths[keyboard_image_index]
+    try:
+        keyboard_image_file = open(image_path, "rb")
+        keyboard_image_bitmap = displayio.OnDiskBitmap(keyboard_image_file)
+        panel_x = DISPLAY_WIDTH - IMAGE_PANEL_SIZE - IMAGE_PANEL_MARGIN_RIGHT
+        panel_y = FLOW_BUTTON_MARGIN + FLOW_BUTTON_HEIGHT + IMAGE_PANEL_TOP_OFFSET_FROM_FLOW
+        keyboard_image_tile = displayio.TileGrid(
+            keyboard_image_bitmap,
+            pixel_shader=keyboard_image_bitmap.pixel_shader,
+            x=panel_x,
+            y=panel_y,
+        )
+        keyboard_page_group.append(keyboard_image_tile)
+        print("Keyboard panel image loaded: {}".format(image_path))
+        return True
+    except Exception as exc:
+        print("Keyboard panel image load failed for {}: {}".format(image_path, exc))
+        return False
+
+
+def cycle_keyboard_panel_image():
+    global keyboard_image_index
+
+    if not keyboard_image_paths:
+        return False
+
+    keyboard_image_index = (keyboard_image_index + 1) % len(keyboard_image_paths)
+    clear_answer_text()
+    return update_keyboard_panel_image()
+
+
 def add_background(group):
     background_bitmap = displayio.Bitmap(DISPLAY_WIDTH, DISPLAY_HEIGHT, 1)
     background_palette = displayio.Palette(1)
@@ -120,6 +241,7 @@ def add_button(
     role,
     font_key="small_button",
     fill_color=BUTTON_FILL_COLOR,
+    text_color=BUTTON_TEXT_COLOR,
 ):
     button_bitmap = displayio.Bitmap(w, h, 1)
     button_palette = displayio.Palette(1)
@@ -127,7 +249,7 @@ def add_button(
     button_tile = displayio.TileGrid(button_bitmap, pixel_shader=button_palette, x=x, y=y)
     group.append(button_tile)
 
-    button_label = label.Label(FONTS[font_key], text=text, color=BUTTON_TEXT_COLOR)
+    button_label = label.Label(FONTS[font_key], text=text, color=text_color)
     button_label.anchor_point = (0.5, 0.5)
     button_label.anchored_position = (x + (w // 2), y + (h // 2) + 1)
     group.append(button_label)
@@ -193,9 +315,10 @@ def build_main_page():
 
 
 def build_keyboard_page():
-    global answer_display_label
+    global answer_display_label, keyboard_page_group
 
     page = displayio.Group()
+    keyboard_page_group = page
     add_background(page)
     add_shared_page_chrome(page, "keyboard")
 
@@ -209,6 +332,14 @@ def build_keyboard_page():
     answer_display_label.anchored_position = (DISPLAY_WIDTH // 2, 92)
     page.append(answer_display_label)
 
+    panel_x = DISPLAY_WIDTH - IMAGE_PANEL_SIZE - IMAGE_PANEL_MARGIN_RIGHT
+    panel_y = FLOW_BUTTON_MARGIN + FLOW_BUTTON_HEIGHT + IMAGE_PANEL_TOP_OFFSET_FROM_FLOW
+    panel_bitmap = displayio.Bitmap(IMAGE_PANEL_SIZE, IMAGE_PANEL_SIZE, 1)
+    panel_palette = displayio.Palette(1)
+    panel_palette[0] = DARK_PANEL_COLOR
+    page.append(displayio.TileGrid(panel_bitmap, pixel_shader=panel_palette, x=panel_x, y=panel_y))
+    update_keyboard_panel_image()
+
     keyboard_rows = (
         ("BkSp", "A", "B", "C", "D", "E", "ENTER"),
         ("F", "G", "H", "I", "J", "K", "L"),
@@ -220,8 +351,9 @@ def build_keyboard_page():
         for col in range(KEYBOARD_COLS):
             key_text = keyboard_rows[row][col]
             key_color = 0x335F8A
+            key_text_color = BUTTON_TEXT_COLOR
             if key_text in ("A", "E", "I", "O", "U"):
-                key_color = 0x4F84B8
+                key_text_color = VOWEL_TEXT_COLOR
             if key_text == "BkSp":
                 key_color = 0xC9B000
             elif key_text == "ENTER":
@@ -240,6 +372,7 @@ def build_keyboard_page():
                 "kb_key",
                 font_key="small_button",
                 fill_color=key_color,
+                text_color=key_text_color,
             )
 
     return page
@@ -264,6 +397,7 @@ def init_display(spi):
             command=TFT_DC,
             chip_select=TFT_CS,
             reset=TFT_RST,
+            baudrate=DISPLAY_SPI_BAUDRATE,
         ),
         width=DISPLAY_WIDTH,
         height=DISPLAY_HEIGHT,
@@ -386,6 +520,14 @@ def handle_button_press(button):
         show_page("keyboard")
         return
 
+    if button["role"] == "flow_back" and current_page_name == "keyboard":
+        show_page("main")
+        return
+
+    if button["role"] == "flow_next" and current_page_name == "keyboard":
+        cycle_keyboard_panel_image()
+        return
+
     if current_page_name != "keyboard":
         return
 
@@ -396,13 +538,19 @@ def handle_button_press(button):
     if key_text == "BkSp":
         answer_display_text = answer_display_text[:-1]
     elif key_text == "ENTER":
-        append_line_to_test_file(answer_display_text)
-        answer_display_text = ""
+        expected_answer = current_image_answer()
+        typed_answer = answer_display_text.lower()
+        if expected_answer and typed_answer == expected_answer:
+            print("Correct: {}".format(typed_answer))
+            cycle_keyboard_panel_image()
+        else:
+            print("Incorrect: '{}' expected '{}'".format(typed_answer, expected_answer))
+            clear_answer_text()
+            update_keyboard_panel_image()
     elif len(key_text) == 1 and key_text.isalpha():
         answer_display_text += key_text
 
-    if answer_display_label is not None:
-        answer_display_label.text = answer_display_text if answer_display_text else "_"
+    refresh_answer_display()
 
 
 def main():
@@ -412,13 +560,15 @@ def main():
 
     backlight = digitalio.DigitalInOut(TFT_BACKLIGHT)
     backlight.direction = digitalio.Direction.OUTPUT
-    backlight.value = True
+    # Keep panel dark until the first frame is fully initialized.
+    backlight.value = False
 
     load_fonts()
 
     prepare_spi_chip_selects()
     spi = board.SPI()
     init_sd_card(spi)
+    load_keyboard_image_paths("/img")
     display = init_display(spi)
     _touch = init_touch(spi)
 
@@ -429,6 +579,8 @@ def main():
     show_page("main")
 
     display.root_group = pages
+    time.sleep(0.05)
+    backlight.value = True
     print("UI scaffold ready: main, keyboard, and scores pages.")
 
     touch_held = False
