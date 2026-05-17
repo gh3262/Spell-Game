@@ -7,6 +7,9 @@ import circuitpython_st7796s
 import xpt2046_circuitpython
 import adafruit_displayio_layout
 import adafruit_bitmap_font.bitmap_font as bitmap_font
+import sdcardio
+import storage
+import json
 from adafruit_display_text import label
 from adafruit_displayio_layout.layouts.page_layout import PageLayout
 from xpt2046_circuitpython.exceptions import ReadFailedException
@@ -19,6 +22,12 @@ TFT_BACKLIGHT = board.D6
 
 # Touch controller chip-select pin.
 TOUCH_CS = board.D5
+
+# SD card chip-select pin.
+SD_CS = board.D25
+
+# SPI flash breakout chip-select pin (reserved, not yet supported).
+FLASH_CS = board.D12
 
 DISPLAY_WIDTH = 480
 DISPLAY_HEIGHT = 320
@@ -64,6 +73,27 @@ pages = None
 current_page_name = "main"
 answer_display_label = None
 answer_display_text = ""
+sd_card = None
+sd_vfs = None
+TEST_FILE_PATH = "/sd/test.txt"
+
+STATS_FILE_PATH = "/sd/stats.json"
+DEFAULT_STATS = {"total_games": 0, "total_correct": 0, "high_score": 0}
+
+
+def _set_cs_high(pin):
+    cs = digitalio.DigitalInOut(pin)
+    cs.direction = digitalio.Direction.OUTPUT
+    cs.value = True
+    cs.deinit()
+
+
+def prepare_spi_chip_selects():
+    # Keep non-target SPI devices deselected during startup.
+    _set_cs_high(TFT_CS)
+    _set_cs_high(TOUCH_CS)
+    _set_cs_high(SD_CS)
+    _set_cs_high(FLASH_CS)
 
 
 def load_fonts():
@@ -257,6 +287,60 @@ def init_touch(spi):
     )
 
 
+def init_sd_card(spi, mount_point="/sd"):
+    global sd_card, sd_vfs
+
+    for attempt in range(1, 4):
+        try:
+            sd_card = sdcardio.SDCard(spi, SD_CS)
+            sd_vfs = storage.VfsFat(sd_card)
+            storage.mount(sd_vfs, mount_point)
+            print("SD card mounted at {}".format(mount_point))
+            return True
+        except Exception as exc:
+            sd_card = None
+            sd_vfs = None
+            print("SD init attempt {} failed: {}".format(attempt, exc))
+            time.sleep(0.15)
+
+    print("SD card init failed after retries.")
+    return False
+
+
+def read_game_stats():
+    try:
+        with open(STATS_FILE_PATH, "r") as stats_file:
+            return json.loads(stats_file.read())
+    except Exception:
+        return dict(DEFAULT_STATS)
+
+
+def save_game_stats(stats):
+    try:
+        with open(STATS_FILE_PATH, "w") as stats_file:
+            stats_file.write(json.dumps(stats))
+        print("Stats saved: {}".format(stats))
+        return True
+    except Exception as exc:
+        print("Stats save failed: {}".format(exc))
+        return False
+
+
+def append_line_to_test_file(line_text):
+    print("Attempting to append to {}: {}".format(TEST_FILE_PATH, line_text))
+    if not line_text:
+        return False
+
+    try:
+        with open(TEST_FILE_PATH, "a") as test_file:
+            test_file.write(line_text + "\n")
+        print("Appended to {}: {}".format(TEST_FILE_PATH, line_text))
+        return True
+    except Exception as exc:
+        print("Write to {} failed: {}".format(TEST_FILE_PATH, exc))
+        return False
+
+
 def map_touch_to_screen(point):
     x, y = point
     if TOUCH_SWAP_XY:
@@ -312,6 +396,7 @@ def handle_button_press(button):
     if key_text == "BkSp":
         answer_display_text = answer_display_text[:-1]
     elif key_text == "ENTER":
+        append_line_to_test_file(answer_display_text)
         answer_display_text = ""
     elif len(key_text) == 1 and key_text.isalpha():
         answer_display_text += key_text
@@ -331,7 +416,9 @@ def main():
 
     load_fonts()
 
+    prepare_spi_chip_selects()
     spi = board.SPI()
+    init_sd_card(spi)
     display = init_display(spi)
     _touch = init_touch(spi)
 
