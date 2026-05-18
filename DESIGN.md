@@ -1,56 +1,75 @@
 # Spelling Game (Touchscreen Edition)
 
 ## Overview
-A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to help players practice spelling. Features an on-screen keyboard, audio playback, and multiple game modes.
+A spelling game for a 4" 480x320 TFT touchscreen, currently running in portrait mode, using touch input and image prompts to help players practice spelling. The current build has the core UI scaffold in place, a working touch keyboard, and a simple visual spelling loop based on BMP filenames.
+
+## Current Status
+- Display, touch, and page navigation are working in the main app.
+- The UI scaffold is live with `main`, `keyboard`, and `scores` pages.
+- The keyboard page loads BMP images from `/img` and derives the expected answer from each filename.
+- Entered answers are checked on-device; correct answers advance to the next image, and incorrect answers clear the current entry.
+- SD card support is wired for CS `D25` and works with a known-good SD card.
+- Audio, RTC-driven status text, persistent scores/stats, and full game-engine integration are still pending.
 
 ## Hardware Used
-- **Microcontroller:** Adafruit Feather RP2040 with PSRAM
-- **Display:** 4" 480x320 TFT (ST7789s SPI)
+- **Microcontroller:** Adafruit Feather RP2040-class board
+- **Display:** 4" 480x320 TFT (ST7796S SPI)
 - **Touch:** XPT2046 SPI controller
 - **Audio:** I2S DAC (TLV320DAC3100 or UDA1334A)
 - **RTC:** DS3231 (I2C)
 - **Storage:** SD card (SPI, CS D25)
 - **Neopixels:** For visual feedback
 
+## Confirmed SPI Pin Map
+- **TFT CS:** `D11`
+- **Touch CS:** `D5`
+- **SD CS:** `D25`
+- **D12:** currently unused
+
 ## UI Layout
-- **Keyboard:** 7x4 grid (26 letters + ENTER + BkSp), 50x50px keys, 1px margin
-- **Info Line:** Clock, question count, etc.
-- **Answer Line:** Top of screen, shows current input
-- **Flow Buttons:** Top left/right, always visible
-- **Replay/Skip Buttons:** For audio replay and skipping questions
+- The app runs in portrait mode using a `320x480` logical layout.
+- **Main Page:** title screen with shared navigation chrome.
+- **Keyboard Page:** 4x7 grid (26 letters + `ENTER` + `BkSp`), `74x35` keys, `2px` gaps, alternating blue row fills, yellow vowel labels, green `ENTER`, and yellow `BkSp`.
+- **Image Panel:** `96x96` BMP preview area near the top of the keyboard page.
+- **Answer Line:** centered near the top of the keyboard page and updated live as letters are pressed.
+- **Flow Buttons:** shared top-corner navigation buttons across pages.
+- **Scores Page:** scaffolded placeholder page; score presentation still needs to be implemented.
 
 ## Game Modes
-- **Audio Spelling:** Hear a word (mp3), spell it
-- **Visual Spelling:** See an image, spell the word
-    - Initial test uses 100x100 pixel .bmp files
-- **Multiple Choice:** Select correct spelling from options
+- **Visual Spelling:** active prototype mode. The game loads `.bmp` images from `/img` and expects the spelling to match the image filename.
+- **Audio Spelling:** planned, not implemented yet.
+- **Multiple Choice:** planned, not implemented yet.
 
 ## Development Plan
-- [ ] **Phase 1: UI Foundation**
-    - Set up display and touch drivers
-    - Implement on-screen keyboard page
-    - Add flow buttons and info/answer lines
-    - Test touch accuracy and layout
-- [ ] **Phase 2: Game Logic & Audio**
-    - Add answer checking logic
-    - Integrate audio playback and replay
-    - Implement skip and feedback features
-- [ ] **Phase 3: Storage & Scoring**
-    - Integrate SD card for assets and scores
-    - Add RTC for time display
-- [ ] **Phase 4: Advanced Features**
-    - Add visual/multiple choice modes
-    - Add Neopixel feedback
-    - Add muscle memory and polish UI
+- [x] **Phase 1: UI Foundation**
+    - Display driver initialized in the main app
+    - Touch driver initialized in the main app
+    - Main, keyboard, and scores pages scaffolded
+    - On-screen keyboard layout implemented
+    - Shared page chrome/navigation implemented
+- [ ] **Phase 2: Core Gameplay Loop**
+    - Image loading from `/img`
+    - Filename-based answer validation
+    - Correct/incorrect handling in the keyboard page
+    - Remaining work: better feedback, skip/replay controls, player-facing status text
+- [ ] **Phase 3: Storage, Scores, and Runtime Data**
+    - SD card initialization integrated into startup
+    - Remaining work: persistent stats, high scores, player data, and RTC-backed info line
+- [ ] **Phase 4: Audio and Expanded Modes**
+    - Planned: audio spelling mode
+    - Planned: multiple choice mode
+    - Planned: sound effects, neopixel feedback, and polish
 
 ## Feature List
 - On-screen alpha keyboard
-- Audio playback for words
-- Visual feedback (correct/incorrect, last wrong answer)
-- Score tracking and storage
-- Multiple game modes (audio, visual, multiple choice)
-- Replay and skip functionality
+- Page-based UI scaffold
+- BMP image loading from `/img`
+- Filename-based spelling check
 - Flow buttons for navigation
+- Planned: audio playback for words
+- Planned: score tracking and storage
+- Planned: multiple game modes beyond the current visual prototype
+- Planned: replay and skip functionality
 
 ## Assets
 - Problem banks (audio, images, choices)
@@ -61,6 +80,11 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
 - More game modes
 - Multiplayer support
 - Online scoreboards
+
+## Notes From Current Bring-Up
+- SD behavior was initially inconsistent because one card/adapter combination was unreliable. A known-good card now mounts successfully on `D25`.
+- The current code uses `sdcardio` and retries SD initialization cleanly without leaving the CS pin busy after a failed attempt.
+- The app currently loads keyboard images directly from `/img`, which means the visual prototype can run even before the full problem-bank/audio pipeline is finished.
 
 ## File Structure
 - **code.py**: Main entry point, UI, and game flow
@@ -78,8 +102,8 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
 *Update this document as the project evolves. Add diagrams, UI sketches, and design decisions as needed.*
 
 
-## Brainstorm Notes (Edited)
-Let me explain my initial thoughts and then set up a plan and documentation based on this.
+## Archived Brainstorm Notes
+These notes are preserved for project history. Some hardware assumptions and layout ideas below were from early planning and have been superseded by the current-state sections above.
 
 - The project will use a 4" 480x320 TFT touchscreen with an ST7789S SPI display driver and an XPT2046 SPI touchscreen controller.
 - The microprocessor will be an Adafruit Feather RP2350 with PSRAM, so we have plenty of memory space.

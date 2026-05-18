@@ -1,4 +1,5 @@
 import time
+import gc
 import board
 import digitalio
 import displayio
@@ -27,17 +28,14 @@ TOUCH_CS = board.D5
 # SD card socket chip-select pin.
 SD_CS = board.D25
 
-# SPI flash breakout chip-select pin (reserved, not currently mounted).
-FLASH_CS = board.D12
-
-DISPLAY_WIDTH = 480
-DISPLAY_HEIGHT = 320
-DISPLAY_ROTATION = 180
+DISPLAY_WIDTH = 320
+DISPLAY_HEIGHT = 480
+DISPLAY_ROTATION = 90
 DISPLAY_SPI_BAUDRATE = 12000000
 
 # Touch orientation tuning.
-TOUCH_SWAP_XY = True
-TOUCH_INVERT_X = False
+TOUCH_SWAP_XY = False
+TOUCH_INVERT_X = True
 TOUCH_INVERT_Y = False
 
 BG_COLOR = 0x101820
@@ -47,29 +45,32 @@ VOWEL_TEXT_COLOR = 0xFFD400
 STATUS_TEXT_COLOR = 0xD0D7DE
 TITLE_TEXT_COLOR = 0xFFFFFF
 DARK_PANEL_COLOR = 0x2B2B2B
+KEY_ROW_COLOR_DARK = 0x2E567E
+KEY_ROW_COLOR_LIGHT = 0x3A6A99
 
-FLOW_BUTTON_WIDTH = 92
-FLOW_BUTTON_HEIGHT = 34
+FLOW_BUTTON_WIDTH = 64
+FLOW_BUTTON_HEIGHT = 40
 FLOW_BUTTON_MARGIN = 8
 
 STATUS_LINE_Y = DISPLAY_HEIGHT - 12
 
-KEYBOARD_COLS = 7
-KEYBOARD_ROWS = 4
-KEY_WIDTH = 62
-KEY_HEIGHT = 33
-KEY_GAP = 1
+KEYBOARD_COLS = 4
+KEYBOARD_ROWS = 7
+KEY_WIDTH = 74
+KEY_HEIGHT = 35
+KEY_GAP = 2
 KEYBOARD_TOTAL_WIDTH = (KEYBOARD_COLS * KEY_WIDTH) + ((KEYBOARD_COLS - 1) * KEY_GAP)
 KEYBOARD_TOTAL_HEIGHT = (KEYBOARD_ROWS * KEY_HEIGHT) + ((KEYBOARD_ROWS - 1) * KEY_GAP)
 KEYBOARD_START_X = (DISPLAY_WIDTH - KEYBOARD_TOTAL_WIDTH) // 2
-KEYBOARD_START_Y = DISPLAY_HEIGHT - KEYBOARD_TOTAL_HEIGHT - 32
+KEYBOARD_START_Y = 190
 
-IMAGE_PANEL_SIZE = 100
-IMAGE_PANEL_MARGIN_RIGHT = 5
-IMAGE_PANEL_TOP_OFFSET_FROM_FLOW = 6
+IMAGE_PANEL_SIZE = 96
+IMAGE_PANEL_X = (DISPLAY_WIDTH - IMAGE_PANEL_SIZE) // 2
+IMAGE_PANEL_Y = FLOW_BUTTON_MARGIN
 
 FONT_PATHS = {
-    "button": "/fonts/ComicSansMS-19.pcf",
+    #"button": "/fonts/ComicSansMS-19.pcf",
+    "button": "/fonts/Calibri-21.pcf",
     "small_button": "/fonts/ComicSansMS-15.pcf",
     "title": "/fonts/EffectsEighty-32.pcf",
     "score": "/fonts/Calibri-17.pcf",
@@ -107,7 +108,6 @@ def prepare_spi_chip_selects():
     _set_cs_high(TFT_CS)
     _set_cs_high(TOUCH_CS)
     _set_cs_high(SD_CS)
-    _set_cs_high(FLASH_CS)
 
 
 def load_fonts():
@@ -195,13 +195,11 @@ def update_keyboard_panel_image():
     try:
         keyboard_image_file = open(image_path, "rb")
         keyboard_image_bitmap = displayio.OnDiskBitmap(keyboard_image_file)
-        panel_x = DISPLAY_WIDTH - IMAGE_PANEL_SIZE - IMAGE_PANEL_MARGIN_RIGHT
-        panel_y = FLOW_BUTTON_MARGIN + FLOW_BUTTON_HEIGHT + IMAGE_PANEL_TOP_OFFSET_FROM_FLOW
         keyboard_image_tile = displayio.TileGrid(
             keyboard_image_bitmap,
             pixel_shader=keyboard_image_bitmap.pixel_shader,
-            x=panel_x,
-            y=panel_y,
+            x=IMAGE_PANEL_X,
+            y=IMAGE_PANEL_Y,
         )
         keyboard_page_group.append(keyboard_image_tile)
         print("Keyboard panel image loaded: {}".format(image_path))
@@ -324,33 +322,34 @@ def build_keyboard_page():
 
     header = label.Label(FONTS["button"], text="Keyboard", color=TITLE_TEXT_COLOR)
     header.anchor_point = (0.5, 0.5)
-    header.anchored_position = (DISPLAY_WIDTH // 2, 56)
+    header.anchored_position = (DISPLAY_WIDTH // 2, 118)
     page.append(header)
 
     answer_display_label = label.Label(FONTS["button"], text="_", color=TITLE_TEXT_COLOR)
     answer_display_label.anchor_point = (0.5, 0.5)
-    answer_display_label.anchored_position = (DISPLAY_WIDTH // 2, 92)
+    answer_display_label.anchored_position = (DISPLAY_WIDTH // 2, 142)
     page.append(answer_display_label)
 
-    panel_x = DISPLAY_WIDTH - IMAGE_PANEL_SIZE - IMAGE_PANEL_MARGIN_RIGHT
-    panel_y = FLOW_BUTTON_MARGIN + FLOW_BUTTON_HEIGHT + IMAGE_PANEL_TOP_OFFSET_FROM_FLOW
     panel_bitmap = displayio.Bitmap(IMAGE_PANEL_SIZE, IMAGE_PANEL_SIZE, 1)
     panel_palette = displayio.Palette(1)
     panel_palette[0] = DARK_PANEL_COLOR
-    page.append(displayio.TileGrid(panel_bitmap, pixel_shader=panel_palette, x=panel_x, y=panel_y))
+    page.append(displayio.TileGrid(panel_bitmap, pixel_shader=panel_palette, x=IMAGE_PANEL_X, y=IMAGE_PANEL_Y))
     update_keyboard_panel_image()
 
     keyboard_rows = (
-        ("BkSp", "A", "B", "C", "D", "E", "ENTER"),
-        ("F", "G", "H", "I", "J", "K", "L"),
-        ("M", "N", "O", "P", "Q", "R", "S"),
-        ("T", "U", "V", "W", "X", "Y", "Z"),
+        ("BkSp", "A", "B", "C"),
+        ("D", "E", "F", "G"),
+        ("H", "I", "J", "K"),
+        ("L", "M", "N", "O"),
+        ("P", "Q", "R", "S"),
+        ("T", "U", "V", "W"),
+        ("X", "Y", "Z", "ENTER"),
     )
 
     for row in range(KEYBOARD_ROWS):
         for col in range(KEYBOARD_COLS):
             key_text = keyboard_rows[row][col]
-            key_color = 0x335F8A
+            key_color = KEY_ROW_COLOR_DARK if (row % 2 == 0) else KEY_ROW_COLOR_LIGHT
             key_text_color = BUTTON_TEXT_COLOR
             if key_text in ("A", "E", "I", "O", "U"):
                 key_text_color = VOWEL_TEXT_COLOR
@@ -424,7 +423,27 @@ def init_touch(spi):
 def init_sd_card(spi, mount_point="/sd"):
     global sd_card, sd_vfs
 
+    def _release_sd_card_resources():
+        global sd_card, sd_vfs
+
+        try:
+            if sd_vfs is not None:
+                storage.umount(mount_point)
+        except Exception:
+            pass
+
+        try:
+            if sd_card is not None and hasattr(sd_card, "deinit"):
+                sd_card.deinit()
+        except Exception:
+            pass
+
+        sd_card = None
+        sd_vfs = None
+        gc.collect()
+
     for attempt in range(1, 4):
+        _release_sd_card_resources()
         try:
             sd_card = sdcardio.SDCard(spi, SD_CS)
             sd_vfs = storage.VfsFat(sd_card)
@@ -432,8 +451,7 @@ def init_sd_card(spi, mount_point="/sd"):
             print("SD card mounted at {}".format(mount_point))
             return True
         except Exception as exc:
-            sd_card = None
-            sd_vfs = None
+            _release_sd_card_resources()
             print("SD init attempt {} failed: {}".format(attempt, exc))
             time.sleep(0.15)
 
