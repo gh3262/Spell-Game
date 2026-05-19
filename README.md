@@ -30,6 +30,69 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
     wavs/
 ```
 
+## Session Updates (2026-05-19)
+- Startup flow now runs in stages: player select, optional new-name entry, mode select, prompt type select, and word-count select.
+- Gameplay now uses a randomized per-round word list in both Picture and Audio modes.
+- Round length is enforced using the selected word count (for example 10 words ends at 10).
+- Correct answers advance through the active randomized list instead of file-order cycling.
+- Skip now advances through the same active round list and updates skip tracking.
+- Audio prompt double-play in Audio mode was fixed so each prompt is played once during active gameplay.
+- Critical runtime imports were restored/verified after refactors (display, touch, RTC, SD, audio, font, and utility modules).
+
+## Deployment Checklist
+1. Confirm local `code.py` saves cleanly and contains no syntax errors.
+2. Copy updated app code to the board (`D:\code.py`).
+3. Verify required libraries exist on device `lib/`:
+    - `adafruit_bitmap_font`
+    - `adafruit_display_text`
+    - `adafruit_displayio_layout`
+    - `adafruit_imageload`
+    - `adafruit_ds3231`
+    - `circuitpython_st7796s.py`
+    - `xpt2046_circuitpython`
+    - plus board-support libs already used by this project
+4. Verify SD card root files exist:
+    - `/sd/players.txt`
+    - `/sd/tplayers.txt`
+    - `/sd/scores.txt`
+5. Verify SD card asset folders exist and are populated:
+    - `/sd/imgs/*.bmp`
+    - `/sd/wavs/*.wav`
+6. Hardware sanity check after reboot:
+    - Display initializes
+    - Touch responds
+    - Startup WAV + beep path runs
+    - RTC initializes (or logs a clear fallback message)
+7. Functional smoke test:
+    - Picture mode: select 10 words, confirm randomized list behavior and stop at 10
+    - Audio mode: confirm no duplicate prompt playback and prompt advances correctly
+8. Optional pre-push cleanup:
+    - Reduce debug logging volume if no longer needed
+    - Keep only diagnostics needed for field troubleshooting
+
+## Known Good Test Script (2-3 Minutes)
+1. Power-cycle or reset the board.
+2. Wait for startup verification:
+    - Startup WAV and beep sequence complete
+    - UI scaffold reports ready
+3. Start a Picture round:
+    - Select a player
+    - Select `Picture`
+    - Select `Random`
+    - Select `10`
+4. Confirm Picture behavior:
+    - Debug output shows a 10-item selected list
+    - First displayed prompt matches the selected list item
+    - Enter one correct answer and verify advance to next selected prompt
+    - Use skip once and verify round continues and index advances
+5. Finish or fast-forward to end of round:
+    - Verify the game stops at 10 total prompts and goes to Results
+6. Start an Audio round:
+    - Select `Audio`, `Random`, `10`
+    - Confirm each prompt plays once (no double playback)
+    - Confirm replay button still plays prompt on demand
+7. If all checks pass, deploy/push is green.
+
 ## Project Structure
 - code.py: Main entry point, UI, and game flow
 - game_engine.py: Game state and logic

@@ -1,27 +1,29 @@
+import random
 import time
-import gc
-import array
-import math
 import board
-import audiobusio
-import audiocore
-import digitalio
+import busio
 import displayio
-import fourwire
-import circuitpython_st7796s
-import xpt2046_circuitpython
-import adafruit_displayio_layout
-import adafruit_bitmap_font.bitmap_font as bitmap_font
-import adafruit_ds3231
-import adafruit_imageload
 import rtc
+import digitalio
+import array
+import audiocore
+import audiobusio
+import gc
+import math
+import os
 import sdcardio
 import storage
-import json
-import os
+import fourwire
+import adafruit_imageload
+import adafruit_ds3231
+import circuitpython_st7796s
+import xpt2046_circuitpython
+from adafruit_bitmap_font import bitmap_font
 from adafruit_display_text import label
 from adafruit_displayio_layout.layouts.page_layout import PageLayout
 from xpt2046_circuitpython.exceptions import ReadFailedException
+from adafruit_ili9341 import ILI9341
+from xpt2046_circuitpython import XPT2046
 
 # Display SPI pins (updated for this hardware revision).
 TFT_CS = board.D11
@@ -67,12 +69,25 @@ WRONG_ANSWER_COLOR = 0xFF6B6B
 CORRECT_ANSWER_HINT_COLOR = 0x00C060
 KEY_ROW_COLOR_DARK = 0x2E567E
 KEY_ROW_COLOR_LIGHT = 0x3A6A99
+MATH_GAME_BLUE = 0x26547C
+MATH_GAME_ORANGE = 0xB85C00
+MATH_GAME_GREEN = 0x1A6B3A
+MATH_GAME_GOLD = 0xC9B000
 
 FLOW_BUTTON_WIDTH = 64
 FLOW_BUTTON_HEIGHT = 40
 FLOW_BUTTON_MARGIN = 8
 
 STATUS_LINE_Y = DISPLAY_HEIGHT - 12
+
+START_ACTIONS_TOP_Y = 360
+START_ACTION_BUTTON_WIDTH = 144
+START_ACTION_BUTTON_HEIGHT = 42
+START_ACTION_BUTTON_GAP_X = 12
+START_ACTION_BUTTON_GAP_Y = 8
+START_ACTION_LEFT_X = (DISPLAY_WIDTH - ((START_ACTION_BUTTON_WIDTH * 2) + START_ACTION_BUTTON_GAP_X)) // 2
+START_ACTION_RIGHT_X = START_ACTION_LEFT_X + START_ACTION_BUTTON_WIDTH + START_ACTION_BUTTON_GAP_X
+START_ACTION_BOTTOM_Y = START_ACTIONS_TOP_Y + START_ACTION_BUTTON_HEIGHT + START_ACTION_BUTTON_GAP_Y
 
 KEYBOARD_COLS = 4
 KEYBOARD_ROWS = 7
@@ -84,7 +99,7 @@ KEYBOARD_TOTAL_HEIGHT = (KEYBOARD_ROWS * KEY_HEIGHT) + ((KEYBOARD_ROWS - 1) * KE
 KEYBOARD_START_X = (DISPLAY_WIDTH - KEYBOARD_TOTAL_WIDTH) // 2
 KEYBOARD_START_Y = 190
 
-IMAGE_PANEL_SIZE = 96
+IMAGE_PANEL_SIZE = 120
 IMAGE_PANEL_X = (DISPLAY_WIDTH - IMAGE_PANEL_SIZE) // 2
 IMAGE_PANEL_Y = FLOW_BUTTON_MARGIN
 
@@ -116,6 +131,9 @@ audio_word_paths = []
 current_mode = MODE_PICTURE
 keyboard_mode_label = None
 TEST_FILE_PATH = "/sd/test.txt"
+PLAYERS_FILE_PATH = "/sd/players.txt"
+TPLAYERS_FILE_PATH = "/sd/tplayers.txt"
+SCORES_FILE_PATH = "/sd/scores.txt"
 
 STATS_FILE_PATH = "/sd/stats.json"
 DEFAULT_STATS = {"total_games": 0, "total_correct": 0, "high_score": 0}
@@ -125,6 +143,500 @@ audio_enable = None
 system_rtc = rtc.RTC()
 external_rtc = None
 last_status_second = None
+
+startup_title_label = None
+startup_prompt_label = None
+startup_summary_label = None
+startup_start_button = None
+startup_option_buttons = []
+startup_option_actions = [None, None, None, None]
+
+STARTUP_STEP_READY = "ready"
+STARTUP_STEP_PLAYER = "player"
+STARTUP_STEP_NAME_ENTRY = "name_entry"
+STARTUP_STEP_MODE = "mode"
+STARTUP_STEP_PROMPT_TYPE = "prompt_type"
+STARTUP_STEP_WORD_COUNT = "word_count"
+
+startup_step = STARTUP_STEP_READY
+startup_player_names = []
+startup_player_page = 0
+startup_name_entry_page = 0
+startup_new_player_text = ""
+startup_selected_player = ""
+startup_selected_mode = MODE_PICTURE
+startup_selected_prompt_type = "random"
+startup_selected_word_count = 10
+MAX_PLAYER_NAME_LEN = 12
+
+NAME_ENTRY_COLS = 4
+NAME_ENTRY_ROWS = 4
+NAME_ENTRY_KEY_WIDTH = 74
+NAME_ENTRY_KEY_HEIGHT = 46
+NAME_ENTRY_KEY_GAP = 2
+NAME_ENTRY_TOTAL_WIDTH = (NAME_ENTRY_COLS * NAME_ENTRY_KEY_WIDTH) + ((NAME_ENTRY_COLS - 1) * NAME_ENTRY_KEY_GAP)
+NAME_ENTRY_START_X = (DISPLAY_WIDTH - NAME_ENTRY_TOTAL_WIDTH) // 2
+NAME_ENTRY_START_Y = 218
+
+NAME_ENTRY_DYNAMIC_PAGES = (
+    ("B", "C", "D", "F", "G", "H", "J", "K"),
+    ("L", "M", "N", "P", "Q", "R", "S", "T"),
+    ("V", "W", "X", "Y", "Z", "U", "_", ""),
+)
+
+name_entry_text_label = None
+name_entry_page_label = None
+name_entry_dynamic_buttons = []
+
+
+def _normalize_player_name(name_text):
+    return name_text.strip()
+
+
+def load_player_names(file_path=PLAYERS_FILE_PATH):
+    global startup_player_names
+
+    try:
+        with open(file_path, "r") as players_file:
+            lines = players_file.readlines()
+    except Exception as exc:
+        print("Player list read failed for {}: {}".format(file_path, exc))
+        startup_player_names = ["PLAYER 1"]
+        return False
+
+    names = []
+    for line in lines:
+        candidate = _normalize_player_name(line)
+        if candidate:
+            names.append(candidate)
+
+    if not names:
+        names = ["PLAYER 1"]
+
+    startup_player_names = names
+    return True
+
+
+def save_player_names(file_path=PLAYERS_FILE_PATH):
+    try:
+        with open(file_path, "w") as players_file:
+            for name in startup_player_names:
+                players_file.write(name + "\n")
+        print("Player list saved to {}".format(file_path))
+        return True
+    except Exception as exc:
+        print("Player list save failed for {}: {}".format(file_path, exc))
+        return False
+
+
+def create_new_player_name():
+    existing = {}
+    for name in startup_player_names:
+        existing[name.upper()] = True
+
+    for index in range(1, 200):
+        candidate = "PLAYER {}".format(index)
+        if candidate.upper() not in existing:
+            return candidate
+
+    return "PLAYER NEW"
+
+
+def add_new_player(name_text=None):
+    global startup_selected_player
+
+    if name_text is None:
+        new_name = create_new_player_name()
+    else:
+        new_name = _normalize_player_name(name_text)
+        if not new_name:
+            new_name = create_new_player_name()
+
+    startup_player_names.append(new_name)
+    save_player_names()
+    startup_selected_player = new_name
+    print("Added player '{}'".format(new_name))
+    return new_name
+
+
+def _normalized_player_name_from_entry():
+    trimmed = _normalize_player_name(startup_new_player_text)
+    if not trimmed:
+        return ""
+
+    return trimmed[:MAX_PLAYER_NAME_LEN]
+
+
+def _has_player_name(candidate_name):
+    candidate_upper = candidate_name.upper()
+    for existing_name in startup_player_names:
+        if existing_name.upper() == candidate_upper:
+            return True
+    return False
+
+
+def _set_name_entry_page(page_index):
+    global startup_name_entry_page
+
+    if page_index < 0:
+        page_index = 0
+    last_index = len(NAME_ENTRY_DYNAMIC_PAGES) - 1
+    if page_index > last_index:
+        page_index = last_index
+    startup_name_entry_page = page_index
+
+
+def _append_to_new_player_name(char_text):
+    global startup_new_player_text
+
+    if len(startup_new_player_text) >= MAX_PLAYER_NAME_LEN:
+        return
+
+    startup_new_player_text += char_text
+
+
+def _backspace_new_player_name():
+    global startup_new_player_text
+    startup_new_player_text = startup_new_player_text[:-1]
+
+
+def _name_entry_display_text():
+    if startup_new_player_text:
+        return startup_new_player_text
+    return "_"
+
+
+def update_name_entry_keyboard_ui():
+    if name_entry_text_label is None or name_entry_page_label is None:
+        return
+
+    name_entry_text_label.text = _name_entry_display_text()
+    name_entry_page_label.text = "Page {}/{}".format(startup_name_entry_page + 1, len(NAME_ENTRY_DYNAMIC_PAGES))
+
+    active_chars = NAME_ENTRY_DYNAMIC_PAGES[startup_name_entry_page]
+    for idx in range(8):
+        key_text = active_chars[idx]
+        key_button = name_entry_dynamic_buttons[idx]
+        if key_text:
+            _set_button_visual(key_button, key_text, MATH_GAME_BLUE)
+        else:
+            _set_button_visual(key_button, "", 0x2F3A44)
+
+
+def _save_new_player_from_entry():
+    global startup_selected_player
+
+    candidate_name = _normalized_player_name_from_entry()
+    if not candidate_name:
+        print("Name entry ignored: empty value")
+        return False
+
+    if _has_player_name(candidate_name):
+        startup_selected_player = candidate_name
+        print("Name entry matched existing player '{}'".format(candidate_name))
+        return True
+
+    startup_selected_player = add_new_player(candidate_name)
+    return True
+
+
+def _handle_name_entry_action(action_text):
+    global startup_step, startup_new_player_text
+
+    if not action_text:
+        return
+
+    if action_text == "BKSP":
+        _backspace_new_player_name()
+        update_name_entry_keyboard_ui()
+        return
+
+    if action_text == "DONE":
+        if _save_new_player_from_entry():
+            startup_new_player_text = ""
+            startup_step = STARTUP_STEP_MODE
+            show_page("main")
+            update_startup_ui()
+        else:
+            update_name_entry_keyboard_ui()
+        return
+
+    if len(action_text) == 1:
+        _append_to_new_player_name(action_text)
+        update_name_entry_keyboard_ui()
+
+
+def _set_button_visual(button_info, text, fill_color, text_color=BUTTON_TEXT_COLOR):
+    button_info["text"] = text
+    button_info["label"].text = text
+    button_info["label"].color = text_color
+    button_info["tile"].pixel_shader[0] = fill_color
+
+
+def _set_start_option(slot_index, text, action_data, fill_color):
+    startup_option_actions[slot_index] = action_data
+    _set_button_visual(startup_option_buttons[slot_index], text, fill_color)
+
+
+def _clear_start_option(slot_index):
+    startup_option_actions[slot_index] = None
+    _set_button_visual(startup_option_buttons[slot_index], "", 0x2F3A44)
+
+
+def _startup_summary_text():
+    player_text = startup_selected_player if startup_selected_player else "-"
+    mode_text = "PIC" if startup_selected_mode == MODE_PICTURE else "AUD"
+    prompt_text = "RAND" if startup_selected_prompt_type == "random" else "CAT"
+    return "{} | {} | {} | {}".format(player_text, mode_text, prompt_text, startup_selected_word_count)
+
+
+def update_startup_ui():
+    if startup_prompt_label is None or startup_summary_label is None or startup_start_button is None:
+        return
+
+    startup_summary_label.text = _startup_summary_text()
+
+    if startup_step == STARTUP_STEP_READY:
+        startup_prompt_label.text = "Press START"
+        _set_button_visual(startup_start_button, "START", MATH_GAME_GREEN)
+        for idx in range(4):
+            _clear_start_option(idx)
+        return
+
+    _set_button_visual(startup_start_button, "", 0x2F3A44)
+
+    if startup_step == STARTUP_STEP_PLAYER:
+        startup_prompt_label.text = "Select Player"
+
+        first_index = startup_player_page * 3
+        for idx in range(3):
+            name_index = first_index + idx
+            if name_index < len(startup_player_names):
+                player_name = startup_player_names[name_index]
+                _set_start_option(idx, player_name, {"kind": "player", "value": player_name}, MATH_GAME_BLUE)
+            else:
+                _clear_start_option(idx)
+
+        _set_start_option(3, "NEW", {"kind": "new_player", "value": "NEW"}, MATH_GAME_ORANGE)
+        return
+
+    if startup_step == STARTUP_STEP_MODE:
+        startup_prompt_label.text = "Select Game Mode"
+        _set_start_option(0, "Picture", {"kind": "mode", "value": MODE_PICTURE}, MATH_GAME_BLUE)
+        _set_start_option(1, "Audio", {"kind": "mode", "value": MODE_AUDIO}, MATH_GAME_ORANGE)
+        _clear_start_option(2)
+        _clear_start_option(3)
+        return
+
+    if startup_step == STARTUP_STEP_PROMPT_TYPE:
+        startup_prompt_label.text = "Random or Category"
+        _set_start_option(0, "Random", {"kind": "prompt_type", "value": "random"}, MATH_GAME_GREEN)
+        _set_start_option(1, "Category", {"kind": "prompt_type", "value": "category"}, MATH_GAME_GOLD)
+        _clear_start_option(2)
+        _clear_start_option(3)
+        return
+
+    if startup_step == STARTUP_STEP_WORD_COUNT:
+        startup_prompt_label.text = "How Many Words?"
+        _set_start_option(0, "10", {"kind": "word_count", "value": 10}, MATH_GAME_BLUE)
+        _set_start_option(1, "20", {"kind": "word_count", "value": 20}, MATH_GAME_ORANGE)
+        _set_start_option(2, "35", {"kind": "word_count", "value": 35}, MATH_GAME_GREEN)
+        _set_start_option(3, "50", {"kind": "word_count", "value": 50}, MATH_GAME_GOLD)
+        return
+
+
+def begin_startup_flow():
+    global startup_step, startup_player_page, startup_name_entry_page, startup_new_player_text
+
+    startup_step = STARTUP_STEP_PLAYER
+    startup_player_page = 0
+    startup_name_entry_page = 0
+    startup_new_player_text = ""
+    load_player_names()
+    update_startup_ui()
+
+
+def _goto_next_startup_step():
+    global startup_step
+
+    if startup_step == STARTUP_STEP_PLAYER:
+        startup_step = STARTUP_STEP_MODE
+    elif startup_step == STARTUP_STEP_MODE:
+        startup_step = STARTUP_STEP_PROMPT_TYPE
+    elif startup_step == STARTUP_STEP_PROMPT_TYPE:
+        startup_step = STARTUP_STEP_WORD_COUNT
+
+    update_startup_ui()
+
+
+def _goto_previous_startup_step():
+    global startup_step
+
+    if startup_step == STARTUP_STEP_WORD_COUNT:
+        startup_step = STARTUP_STEP_PROMPT_TYPE
+    elif startup_step == STARTUP_STEP_PROMPT_TYPE:
+        startup_step = STARTUP_STEP_MODE
+    elif startup_step == STARTUP_STEP_MODE:
+        startup_step = STARTUP_STEP_PLAYER
+    elif startup_step == STARTUP_STEP_NAME_ENTRY:
+        startup_step = STARTUP_STEP_PLAYER
+    elif startup_step == STARTUP_STEP_PLAYER:
+        startup_step = STARTUP_STEP_READY
+
+    update_startup_ui()
+
+
+def _select_random_unique_items(items, count):
+    """Select random unique items from a list (CircuitPython compatible)."""
+    if count >= len(items):
+        return items[:]
+    
+    selected = []
+    available = items[:]
+    for _ in range(count):
+        index = random.randint(0, len(available) - 1)
+        selected.append(available[index])
+        available.pop(index)
+    return selected
+
+
+def finalize_startup_flow():
+    print("[DEBUG] Entered finalize_startup_flow")  # Confirm function entry
+    global game_word_list, game_word_index, game_total, game_correct, game_skipped, game_active
+    set_game_mode(startup_selected_mode)
+    # Select the correct asset list
+    if startup_selected_mode == MODE_PICTURE:
+        asset_list = keyboard_image_paths[:]
+    else:
+        asset_list = audio_word_paths[:]
+    print("[DEBUG] Asset list prepared, selecting words...")  # Confirm asset list setup
+    # Randomly select X unique words
+    word_count = min(startup_selected_word_count, len(asset_list))
+    game_word_list = _select_random_unique_items(asset_list, word_count)
+    print("[DEBUG] Selected word list:")
+    for i, w in enumerate(game_word_list):
+        print("  {}: {}".format(i+1, w))
+    game_word_index = 0
+    game_total = word_count
+    game_correct = 0
+    game_skipped = 0
+    game_active = True
+    print(
+        "Start game: player='{}' mode='{}' prompt='{}' words={}".format(
+            startup_selected_player,
+            startup_selected_mode,
+            startup_selected_prompt_type,
+            startup_selected_word_count,
+        )
+    )
+    print("[DEBUG] finalize_startup_flow completed")  # Confirm function exit
+    show_page("keyboard")
+    show_current_game_word()
+
+
+def show_current_game_word():
+    """Update the UI to show the current word/image/audio."""
+    global game_word_list, game_word_index, game_active, keyboard_image_bitmap, keyboard_image_tile
+    print(f"[DEBUG] Showing current word. Index: {game_word_index}, Active: {game_active}")
+    if not game_active or game_word_index >= len(game_word_list):
+        print("[DEBUG] No active game or index out of range.")
+        return
+    # Set the current asset index for answer checking and display
+    if current_mode == MODE_PICTURE:
+        # Load and display the image directly from the randomized list
+        image_path = game_word_list[game_word_index]
+        print(f"[DEBUG] Displaying image: {image_path}")
+        # Clear old image first
+        clear_keyboard_panel_image()
+        try:
+            with open(image_path, "rb") as f:
+                keyboard_image_bitmap, keyboard_image_palette = adafruit_imageload.load(f)
+            keyboard_image_tile = displayio.TileGrid(
+                keyboard_image_bitmap,
+                pixel_shader=keyboard_image_palette,
+                x=IMAGE_PANEL_X,
+                y=IMAGE_PANEL_Y,
+            )
+            keyboard_page_group.append(keyboard_image_tile)
+            print(f"[DEBUG] Image loaded and displayed successfully")
+        except Exception as exc:
+            print("Failed to load image {}: {}".format(image_path, exc))
+    else:
+        # Play audio directly from the randomized list
+        audio_path = game_word_list[game_word_index]
+        print(f"[DEBUG] Playing audio: {audio_path}")
+        try:
+            global audio_word_index
+            audio_word_index = audio_word_paths.index(audio_path)
+            update_keyboard_panel_image()
+            play_word_audio_for_current_image()
+        except Exception as exc:
+            print("Failed to play audio {}: {}".format(audio_path, exc))
+    clear_answer_text()
+    refresh_answer_display()
+
+
+def handle_skip_word():
+    global game_skipped, game_word_index, game_active
+    if game_active:
+        game_skipped += 1
+        advance_to_next_word()
+
+
+def advance_to_next_word():
+    global game_word_index, game_active, game_total
+    print(f"[DEBUG] Advancing to next word. Current index: {game_word_index}, Total: {game_total}")
+    game_word_index += 1
+    if game_word_index >= game_total:
+        print("[DEBUG] Word limit reached. Ending game.")
+        game_active = False
+        show_results_page()
+    else:
+        show_current_game_word()
+
+
+def handle_startup_option(slot_index):
+    global startup_selected_player, startup_selected_mode, startup_selected_prompt_type
+    global startup_selected_word_count, startup_player_page
+    global startup_step, startup_name_entry_page, startup_new_player_text
+
+    if slot_index < 0 or slot_index >= len(startup_option_actions):
+        return
+
+    action_data = startup_option_actions[slot_index]
+    if action_data is None:
+        return
+
+    action_kind = action_data.get("kind")
+    action_value = action_data.get("value")
+
+    if action_kind == "player":
+        startup_selected_player = action_value
+        _goto_next_startup_step()
+        return
+
+    if action_kind == "new_player":
+        startup_new_player_text = ""
+        startup_step = STARTUP_STEP_NAME_ENTRY
+        _set_name_entry_page(0)
+        update_name_entry_keyboard_ui()
+        show_page("name_entry")
+        return
+
+    if action_kind == "mode":
+        startup_selected_mode = action_value
+        _goto_next_startup_step()
+        return
+
+    if action_kind == "prompt_type":
+        startup_selected_prompt_type = action_value
+        _goto_next_startup_step()
+        return
+
+    if action_kind == "word_count":
+        startup_selected_word_count = action_value
+        finalize_startup_flow()
+        return
 
 
 def build_status_line_text():
@@ -236,7 +748,7 @@ def init_audio_output():
             word_select=AUDIO_WORD_SELECT,
             data=AUDIO_DATA,
         )
-        print("I2S audio initialized")
+        # print("I2S audio initialized")
         return True
     except Exception as exc:
         print("I2S audio init failed: {}".format(exc))
@@ -485,10 +997,14 @@ def load_audio_word_paths(folder_path=AUDIO_WORDS_DIR):
 
 
 def current_image_answer():
-    if not keyboard_image_paths:
+    # During gameplay, use the randomized game_word_list
+    if game_active and game_word_list and game_word_index < len(game_word_list):
+        image_path = game_word_list[game_word_index]
+    elif not keyboard_image_paths:
         return ""
-
-    image_path = keyboard_image_paths[keyboard_image_index]
+    else:
+        image_path = keyboard_image_paths[keyboard_image_index]
+    
     image_name = image_path.split("/")[-1]
     dot_index = image_name.rfind(".")
     if dot_index > 0:
@@ -497,10 +1013,14 @@ def current_image_answer():
 
 
 def current_audio_answer():
-    if not audio_word_paths:
+    # During gameplay, use the randomized game_word_list
+    if game_active and game_word_list and game_word_index < len(game_word_list):
+        wav_path = game_word_list[game_word_index]
+    elif not audio_word_paths:
         return ""
-
-    wav_path = audio_word_paths[audio_word_index]
+    else:
+        wav_path = audio_word_paths[audio_word_index]
+    
     wav_name = wav_path.split("/")[-1]
     dot_index = wav_name.rfind(".")
     if dot_index > 0:
@@ -605,6 +1125,11 @@ def cycle_keyboard_panel_image():
     if current_mode == MODE_AUDIO:
         return cycle_audio_prompt()
 
+    # During gameplay, advance to next word instead of cycling through all images
+    if game_active:
+        advance_to_next_word()
+        return True
+
     if not keyboard_image_paths:
         return False
 
@@ -616,6 +1141,11 @@ def cycle_keyboard_panel_image():
 
 def cycle_audio_prompt():
     global audio_word_index
+
+    # During gameplay, advance to next word instead of cycling through all audio
+    if game_active:
+        advance_to_next_word()
+        return True
 
     if not audio_word_paths:
         return False
@@ -675,6 +1205,8 @@ def add_button(
         "name": name,
         "role": role,
         "text": text,
+        "tile": button_tile,
+        "label": button_label,
         "x0": x,
         "x1": x + w,
         "y0": y,
@@ -720,47 +1252,119 @@ def add_shared_page_chrome(page_group, page_name):
 
 
 def build_main_page():
+    global startup_title_label, startup_prompt_label, startup_summary_label
+    global startup_start_button, startup_option_buttons
+
     page = displayio.Group()
     add_background(page)
     add_shared_page_chrome(page, "main")
 
-    title_label = label.Label(FONTS["title"], text="Spell Game", color=TITLE_TEXT_COLOR)
-    title_label.anchor_point = (0.5, 0.5)
-    title_label.anchored_position = (DISPLAY_WIDTH // 2, 95)
-    page.append(title_label)
+    startup_title_label = label.Label(FONTS["title"], text="Spell Game", color=TITLE_TEXT_COLOR)
+    startup_title_label.anchor_point = (0.5, 0.5)
+    startup_title_label.anchored_position = (DISPLAY_WIDTH // 2, 88)
+    page.append(startup_title_label)
 
-    mode_label = label.Label(FONTS["button"], text="Select Mode", color=TITLE_TEXT_COLOR)
-    mode_label.anchor_point = (0.5, 0.5)
-    mode_label.anchored_position = (DISPLAY_WIDTH // 2, 154)
-    page.append(mode_label)
+    startup_prompt_label = label.Label(FONTS["button"], text="Press START", color=TITLE_TEXT_COLOR)
+    startup_prompt_label.anchor_point = (0.5, 0.5)
+    startup_prompt_label.anchored_position = (DISPLAY_WIDTH // 2, 148)
+    page.append(startup_prompt_label)
 
-    add_button(
+    startup_summary_label = label.Label(FONTS["score"], text="- | PIC | RAND | 10", color=STATUS_TEXT_COLOR)
+    startup_summary_label.anchor_point = (0.5, 0.5)
+    startup_summary_label.anchored_position = (DISPLAY_WIDTH // 2, 182)
+    page.append(startup_summary_label)
+
+    startup_start_button = add_button(
         page,
         "main",
-        56,
-        176,
-        96,
-        44,
-        "Picture",
-        "main_mode_picture",
-        "mode_picture",
+        (DISPLAY_WIDTH - 132) // 2,
+        222,
+        132,
+        48,
+        "START",
+        "main_start",
+        "startup_begin",
         font_key="button",
-        fill_color=0x26547C,
+        fill_color=MATH_GAME_GREEN,
+    )
+
+    startup_option_buttons = []
+    startup_option_buttons.append(
+        add_button(
+            page,
+            "main",
+            START_ACTION_LEFT_X,
+            START_ACTIONS_TOP_Y,
+            START_ACTION_BUTTON_WIDTH,
+            START_ACTION_BUTTON_HEIGHT,
+            "",
+            "main_start_opt_0",
+            "startup_opt_0",
+            font_key="small_button",
+            fill_color=0x2F3A44,
+        )
+    )
+    startup_option_buttons.append(
+        add_button(
+            page,
+            "main",
+            START_ACTION_RIGHT_X,
+            START_ACTIONS_TOP_Y,
+            START_ACTION_BUTTON_WIDTH,
+            START_ACTION_BUTTON_HEIGHT,
+            "",
+            "main_start_opt_1",
+            "startup_opt_1",
+            font_key="small_button",
+            fill_color=0x2F3A44,
+        )
+    )
+    startup_option_buttons.append(
+        add_button(
+            page,
+            "main",
+            START_ACTION_LEFT_X,
+            START_ACTION_BOTTOM_Y,
+            START_ACTION_BUTTON_WIDTH,
+            START_ACTION_BUTTON_HEIGHT,
+            "",
+            "main_start_opt_2",
+            "startup_opt_2",
+            font_key="small_button",
+            fill_color=0x2F3A44,
+        )
+    )
+    startup_option_buttons.append(
+        add_button(
+            page,
+            "main",
+            START_ACTION_RIGHT_X,
+            START_ACTION_BOTTOM_Y,
+            START_ACTION_BUTTON_WIDTH,
+            START_ACTION_BUTTON_HEIGHT,
+            "",
+            "main_start_opt_3",
+            "startup_opt_3",
+            font_key="small_button",
+            fill_color=0x2F3A44,
+        )
     )
 
     add_button(
         page,
         "main",
-        168,
-        176,
-        96,
-        44,
-        "Audio",
-        "main_mode_audio",
-        "mode_audio",
-        font_key="button",
-        fill_color=0xB85C00,
+        DISPLAY_WIDTH - FLOW_BUTTON_MARGIN - 88,
+        58,
+        88,
+        34,
+        "MODE",
+        "main_mode_hint",
+        "main_mode_hint",
+        font_key="small_button",
+        fill_color=0x2F3A44,
     )
+
+    update_startup_ui()
     return page
 
 
@@ -853,6 +1457,86 @@ def build_keyboard_page():
                 text_color=key_text_color,
             )
 
+    return page
+
+
+def build_name_entry_page():
+    global name_entry_text_label, name_entry_page_label, name_entry_dynamic_buttons
+
+    page = displayio.Group()
+    add_background(page)
+    add_shared_page_chrome(page, "name_entry")
+
+    header = label.Label(FONTS["button"], text="New Player Name", color=TITLE_TEXT_COLOR)
+    header.anchor_point = (0.5, 0.5)
+    header.anchored_position = (DISPLAY_WIDTH // 2, 98)
+    page.append(header)
+
+    name_entry_text_label = label.Label(FONTS["button"], text="_", color=VOWEL_TEXT_COLOR)
+    name_entry_text_label.anchor_point = (0.5, 0.5)
+    name_entry_text_label.anchored_position = (DISPLAY_WIDTH // 2, 132)
+    page.append(name_entry_text_label)
+
+    name_entry_page_label = label.Label(FONTS["score"], text="Page 1/3", color=STATUS_TEXT_COLOR)
+    name_entry_page_label.anchor_point = (0.5, 0.5)
+    name_entry_page_label.anchored_position = (DISPLAY_WIDTH // 2, 162)
+    page.append(name_entry_page_label)
+
+    fixed_rows = (
+        ("PREV", "name_entry_prev", "ne_prev", MATH_GAME_ORANGE),
+        ("NEXT", "name_entry_next", "ne_next", MATH_GAME_GREEN),
+        ("BKSP", "name_entry_bksp", "ne_bksp", MATH_GAME_ORANGE),
+        ("DONE", "name_entry_done", "ne_done", MATH_GAME_GREEN),
+        ("A", "name_entry_a", "ne_char", MATH_GAME_GOLD),
+        ("E", "name_entry_e", "ne_char", MATH_GAME_GOLD),
+        ("I", "name_entry_i", "ne_char", MATH_GAME_GOLD),
+        ("O", "name_entry_o", "ne_char", MATH_GAME_GOLD),
+    )
+
+    for idx, fixed_def in enumerate(fixed_rows):
+        key_text, key_name, key_role, key_color = fixed_def
+        row = idx // NAME_ENTRY_COLS
+        col = idx % NAME_ENTRY_COLS
+        key_x = NAME_ENTRY_START_X + (col * (NAME_ENTRY_KEY_WIDTH + NAME_ENTRY_KEY_GAP))
+        key_y = NAME_ENTRY_START_Y + (row * (NAME_ENTRY_KEY_HEIGHT + NAME_ENTRY_KEY_GAP))
+        add_button(
+            page,
+            "name_entry",
+            key_x,
+            key_y,
+            NAME_ENTRY_KEY_WIDTH,
+            NAME_ENTRY_KEY_HEIGHT,
+            key_text,
+            key_name,
+            key_role,
+            font_key="small_button",
+            fill_color=key_color,
+            text_color=BUTTON_TEXT_COLOR,
+        )
+
+    name_entry_dynamic_buttons = []
+    for idx in range(8):
+        row = 2 + (idx // NAME_ENTRY_COLS)
+        col = idx % NAME_ENTRY_COLS
+        key_x = NAME_ENTRY_START_X + (col * (NAME_ENTRY_KEY_WIDTH + NAME_ENTRY_KEY_GAP))
+        key_y = NAME_ENTRY_START_Y + (row * (NAME_ENTRY_KEY_HEIGHT + NAME_ENTRY_KEY_GAP))
+        button_info = add_button(
+            page,
+            "name_entry",
+            key_x,
+            key_y,
+            NAME_ENTRY_KEY_WIDTH,
+            NAME_ENTRY_KEY_HEIGHT,
+            "",
+            "name_entry_dyn_{}".format(idx),
+            "ne_dynamic",
+            font_key="small_button",
+            fill_color=0x2F3A44,
+            text_color=BUTTON_TEXT_COLOR,
+        )
+        name_entry_dynamic_buttons.append(button_info)
+
+    update_name_entry_keyboard_ui()
     return page
 
 
@@ -1011,34 +1695,92 @@ def show_page(page_name):
 
 
 def handle_button_press(button):
-    global answer_display_text
+    global answer_display_text, startup_player_page, startup_step, startup_new_player_text
+    global game_active, game_word_index, game_total, game_correct
 
     play_button_feedback()
 
-    if button["role"] == "mode_picture" and current_page_name == "main":
-        set_game_mode(MODE_PICTURE)
-        show_page("keyboard")
+    if button["role"] == "startup_begin" and current_page_name == "main":
+        begin_startup_flow()
         return
 
-    if button["role"] == "mode_audio" and current_page_name == "main":
-        set_game_mode(MODE_AUDIO)
-        show_page("keyboard")
-        play_word_audio_for_current_image()
+    if button["role"].startswith("startup_opt_") and current_page_name == "main":
+        slot_text = button["role"].split("_")[-1]
+        try:
+            slot_index = int(slot_text)
+        except Exception:
+            slot_index = -1
+        handle_startup_option(slot_index)
         return
 
     if button["role"] == "flow_next" and current_page_name == "main":
-        show_page("keyboard")
-        if current_mode == MODE_AUDIO:
-            play_word_audio_for_current_image()
+        if startup_step == STARTUP_STEP_PLAYER:
+            max_page = (len(startup_player_names) - 1) // 3
+            if startup_player_page < max_page:
+                startup_player_page += 1
+                update_startup_ui()
         return
+
+    if button["role"] == "flow_back" and current_page_name == "main":
+        if startup_step == STARTUP_STEP_PLAYER:
+            if startup_player_page > 0:
+                startup_player_page -= 1
+                update_startup_ui()
+            else:
+                _goto_previous_startup_step()
+        elif startup_step != STARTUP_STEP_READY:
+            _goto_previous_startup_step()
+        return
+
+    if button["role"] == "flow_back" and current_page_name == "name_entry":
+        startup_new_player_text = ""
+        startup_step = STARTUP_STEP_PLAYER
+        show_page("main")
+        update_startup_ui()
+        return
+
+    if button["role"] == "flow_next" and current_page_name == "name_entry":
+        _set_name_entry_page(startup_name_entry_page + 1)
+        update_name_entry_keyboard_ui()
+        return
+
+    if current_page_name == "name_entry":
+        if button["role"] == "ne_prev":
+            _set_name_entry_page(startup_name_entry_page - 1)
+            update_name_entry_keyboard_ui()
+            return
+
+        if button["role"] == "ne_next":
+            _set_name_entry_page(startup_name_entry_page + 1)
+            update_name_entry_keyboard_ui()
+            return
+
+        if button["role"] == "ne_bksp":
+            _handle_name_entry_action("BKSP")
+            return
+
+        if button["role"] == "ne_done":
+            _handle_name_entry_action("DONE")
+            return
+
+        if button["role"] == "ne_char":
+            _handle_name_entry_action(button.get("text", ""))
+            return
+
+        if button["role"] == "ne_dynamic":
+            _handle_name_entry_action(button.get("text", ""))
+            return
 
     if button["role"] == "flow_back" and current_page_name == "keyboard":
         show_page("main")
         return
 
     if button["role"] == "flow_next" and current_page_name == "keyboard":
-        cycle_keyboard_panel_image()
-        if current_mode == MODE_AUDIO:
+        if game_active:
+            handle_skip_word()
+        else:
+            cycle_keyboard_panel_image()
+        if current_mode == MODE_AUDIO and not game_active:
             play_word_audio_for_current_image()
         return
 
@@ -1066,10 +1808,12 @@ def handle_button_press(button):
         typed_answer = answer_display_text.lower()
         if expected_answer and typed_answer == expected_answer:
             print("Correct: {}".format(typed_answer))
+            if game_active:
+                game_correct += 1
             play_result_feedback(True)
             clear_last_answer_label()
             cycle_keyboard_panel_image()
-            if current_mode == MODE_AUDIO:
+            if current_mode == MODE_AUDIO and not game_active:
                 play_word_audio_for_current_image()
         else:
             print("Incorrect: '{}' expected '{}'".format(typed_answer, expected_answer))
@@ -1113,8 +1857,11 @@ def main():
 
     pages = PageLayout(x=0, y=0)
     pages.add_content(build_main_page(), page_name="main")
+    pages.add_content(build_name_entry_page(), page_name="name_entry")
     pages.add_content(build_keyboard_page(), page_name="keyboard")
     pages.add_content(build_scores_page(), page_name="scores")
+    load_player_names()
+    update_startup_ui()
     set_game_mode(MODE_PICTURE)
     show_page("main")
     update_status_line(force=True)

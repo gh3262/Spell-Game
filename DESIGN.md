@@ -28,6 +28,72 @@ Repository sample data files:
 - SD card support is wired for CS `D12` and mounts at `/sd` in the current build.
 - RTC-driven status text, persistent scores/stats, and full game-engine integration are still pending.
 
+## Session Updates (2026-05-19)
+- Startup flow now supports staged configuration before play:
+    - Player select
+    - New player name entry
+    - Mode select (Picture/Audio)
+    - Prompt type select
+    - Word count select
+- Finalize/start now builds a per-round active list (`game_word_list`) and resets round counters/indexes.
+- Random selection uses a CircuitPython-compatible unique picker (no dependency on `random.sample`).
+- Active gameplay prompt/answer flow now reads from the round list rather than raw file-order indices.
+- Next-word advancement now enforces the configured round length (`game_total`) and exits to results when complete.
+- Skip path is integrated into round progression and skip counting.
+- Audio-mode duplicate prompt playback was fixed by removing secondary replay calls after advancement.
+- Runtime import set was repaired after refactor drift so startup and hardware init paths resolve correctly.
+
+## Deployment Checklist
+1. Save and deploy updated `code.py` to board root.
+2. Verify `lib/` contains required runtime modules used by current code paths:
+    - `adafruit_bitmap_font.bitmap_font`
+    - `adafruit_display_text`
+    - `adafruit_displayio_layout`
+    - `adafruit_imageload`
+    - `adafruit_ds3231`
+    - `circuitpython_st7796s.py`
+    - `xpt2046_circuitpython`
+    - supporting CircuitPython core modules (`fourwire`, etc.)
+3. Verify SD mount prerequisites:
+    - `/sd/players.txt`
+    - `/sd/tplayers.txt`
+    - `/sd/scores.txt`
+    - `/sd/imgs/*.bmp`
+    - `/sd/wavs/*.wav`
+4. Boot validation:
+    - RTC init logs expected state
+    - SD mounts without retries/failures
+    - UI scaffold initializes (`main`, `keyboard`, `scores`)
+5. Gameplay validation:
+    - Picture mode uses randomized round list and stops at selected word count
+    - Audio mode plays one prompt per word (no duplicate play), advances correctly, and respects round limit
+6. Before push:
+    - Remove or reduce temporary debug prints not needed for field diagnostics
+    - Confirm README/DESIGN notes reflect current behavior
+
+## Known Good Test Script (2-3 Minutes)
+1. Reset board and capture startup logs.
+2. Confirm bring-up sequence:
+    - RTC init path logs expected state
+    - SD mount succeeds
+    - Startup WAV + beep complete
+    - UI scaffold initialized
+3. Execute Picture mode smoke test:
+    - Player -> Picture -> Random -> 10
+    - Verify selected 10-word debug list appears
+    - Verify current displayed prompt is from selected list
+    - Verify one correct answer advances to the next selected prompt
+4. Execute skip behavior check:
+    - Trigger skip once in active round
+    - Verify index advances and round remains bounded by selected count
+5. Execute round-end check:
+    - Verify transition to Results at configured total (`game_total`)
+6. Execute Audio mode smoke test:
+    - Player -> Audio -> Random -> 10
+    - Verify each prompt plays once on advance
+    - Verify replay button triggers prompt playback on demand
+7. If all checks pass, mark build as known-good for push.
+
 ## Hardware Used
 - **Microcontroller:** Adafruit Feather RP2040-class board
 - **Display:** 4" 480x320 TFT (ST7796S SPI)
