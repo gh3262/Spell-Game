@@ -3,17 +3,29 @@
 ## Overview
 A spelling game for a 4" 480x320 TFT touchscreen, currently running in portrait mode, using touch input with two active prompt modes: Picture and Audio. The current build includes a working page-based UI, touch keyboard, SD-backed image and WAV prompt loading, and gameplay feedback audio.
 
+Active runtime asset locations on SD card:
+- Picture prompts: `/sd/imgs/*.bmp`
+- Audio prompts: `/sd/wavs/*.wav`
+
+Runtime data files on SD card root:
+- `/sd/players.txt` (current active player list)
+- `/sd/tplayers.txt` (template player list used when resetting)
+- `/sd/scores.txt` (saved score data)
+
+Repository sample data files:
+- Sample copies are kept in the repo `files/` folder: `files/players.txt`, `files/tplayers.txt`, and `files/scores.txt`.
+
 ## Current Status
 - Display, touch, and page navigation are working in the main app.
 - The UI scaffold is live with `main`, `keyboard`, and `scores` pages.
 - Main page now includes mode selection buttons: Picture and Audio.
-- Picture mode loads BMP files from `/img` and derives the expected answer from the image filename.
-- Audio mode loads WAV prompts from `/wavs`, plays the active file, and derives the expected answer from the WAV filename.
+- Picture mode loads BMP files from `/sd/imgs` and derives the expected answer from the image filename.
+- Audio mode loads WAV prompts from `/sd/wavs`, plays the active file, and derives the expected answer from the WAV filename.
 - In Audio mode, the keyboard panel displays a fixed speaker image (`/img/_audio.bmp`, with fallback `/imgs/_audio.bmp`).
 - Entered answers are checked on-device; correct answers advance prompts and incorrect answers clear current entry.
 - Success/fail beep feedback is implemented on `ENTER`.
 - Replay button is implemented on the keyboard page for Audio mode.
-- SD card support is wired for CS `D25` and works with a known-good SD card.
+- SD card support is wired for CS `D12` and mounts at `/sd` in the current build.
 - RTC-driven status text, persistent scores/stats, and full game-engine integration are still pending.
 
 ## Hardware Used
@@ -22,18 +34,18 @@ A spelling game for a 4" 480x320 TFT touchscreen, currently running in portrait 
 - **Touch:** XPT2046 SPI controller
 - **Audio Amplifier:** Adafruit MAX98357A I2S 3W Class-D mono amp
 - **RTC:** DS3231 (I2C)
-- **Storage:** SD card (SPI, CS D25)
+- **Storage:** SD card (SPI, CS D12)
 - **Neopixels:** For visual feedback
 
 ## Confirmed Pin Map
 - **TFT CS:** `D11`
 - **Touch CS:** `D5`
-- **SD CS:** `D25`
+- **SD CS:** `D12`
 - **I2S BCLK:** `A0`
 - **I2S LRC/WS:** `A1`
 - **I2S DIN:** `A3`
 - **MAX98357A SD/Enable:** `A2`
-- **D12:** currently unused
+- **D12:** SD card CS in current build
 
 ## UI Layout
 - The app runs in portrait mode using a `320x480` logical layout.
@@ -48,8 +60,8 @@ A spelling game for a 4" 480x320 TFT touchscreen, currently running in portrait 
 - **Scores Page:** scaffolded placeholder page; score presentation still needs to be implemented.
 
 ## Game Modes
-- **Picture Spelling (active):** loads `.bmp` images from `/img` and expects spelling to match the image filename.
-- **Audio Spelling (active):** loads `.wav` prompts from `/wavs`, plays the prompt, and expects spelling to match the wav filename.
+- **Picture Spelling (active):** loads `.bmp` images from `/sd/imgs` and expects spelling to match the image filename.
+- **Audio Spelling (active):** loads `.wav` prompts from `/sd/wavs`, plays the prompt, and expects spelling to match the wav filename.
 - **Multiple Choice:** planned, not implemented yet.
 
 ## Development Plan
@@ -60,7 +72,7 @@ A spelling game for a 4" 480x320 TFT touchscreen, currently running in portrait 
     - On-screen keyboard layout implemented
     - Shared page chrome/navigation implemented
 - [x] **Phase 2: Core Gameplay Loop**
-    - Image loading from `/img`
+    - Image loading from `/sd/imgs`
     - Filename-based answer validation
     - Correct/incorrect handling in the keyboard page
     - Picture mode and Audio mode selection implemented
@@ -68,7 +80,7 @@ A spelling game for a 4" 480x320 TFT touchscreen, currently running in portrait 
     - Success/fail beep feedback implemented
 - [ ] **Phase 3: Storage, Scores, and Runtime Data**
     - SD card initialization integrated into startup
-    - WAV prompt loading from `/wavs` integrated
+    - WAV prompt loading from `/sd/wavs` integrated
     - Remaining work: persistent stats, high scores, player data, and RTC-backed info line
 - [ ] **Phase 4: Audio and Expanded Modes**
     - Planned: multiple choice mode
@@ -78,8 +90,8 @@ A spelling game for a 4" 480x320 TFT touchscreen, currently running in portrait 
 ## Feature List
 - On-screen alpha keyboard
 - Page-based UI scaffold
-- BMP image loading from `/img`
-- WAV audio prompt loading from `/wavs`
+- BMP image loading from `/sd/imgs`
+- WAV audio prompt loading from `/sd/wavs`
 - Filename-based spelling checks (image mode and audio mode)
 - Flow buttons for navigation
 - Audio replay button on keyboard page
@@ -90,10 +102,26 @@ A spelling game for a 4" 480x320 TFT touchscreen, currently running in portrait 
 - Planned: skip/question pacing controls
 
 ## Assets
-- Prompt assets in `/img` and `/wavs`
+- Prompt assets are expected on the SD card at `/sd/imgs` and `/sd/wavs`
+- Reserved audio-mode speaker image is currently loaded from internal storage candidates: `/img/_audio.bmp` then `/imgs/_audio.bmp`
 - Problem banks (audio, images, choices)
 - Fonts
 - Audio files (wav currently active, mp3 planned later)
+
+## SD Card Layout (Expected)
+```text
+/sd/
+    players.txt      # active player list used by runtime
+    tplayers.txt     # template player list restored on reset
+    scores.txt       # saved scores
+    imgs/            # picture prompts (*.bmp)
+    wavs/            # audio prompts (*.wav)
+```
+
+Repo-side sample files for SD root data:
+- `files/players.txt`
+- `files/tplayers.txt`
+- `files/scores.txt`
 
 ## Future Ideas
 - More game modes
@@ -101,7 +129,7 @@ A spelling game for a 4" 480x320 TFT touchscreen, currently running in portrait 
 - Online scoreboards
 
 ## Notes From Current Bring-Up
-- SD behavior was initially inconsistent because one card/adapter combination was unreliable. A known-good card now mounts successfully on `D25`.
+- SD behavior was initially inconsistent because one card/adapter combination was unreliable. A known-good card now mounts successfully on `D12`.
 - The current code uses `sdcardio` and retries SD initialization cleanly without leaving the CS pin busy after a failed attempt.
 - Audio hardware is confirmed working with MAX98357A using `A0/A1/A3` plus `A2` enable control.
 - WAV playback plus generated beep sequences are both confirmed working without breaking touchscreen input.
@@ -138,7 +166,7 @@ Legacy assumptions retained below are intentionally marked as superseded where n
 - [Superseded] Early board wording: RP2350 mention (current project notes use RP2040-class board wording).
 - [Superseded] Early audio-device assumption: TLV320/UDA1334A path (current build uses MAX98357A on I2S).
 - DS3231 RTC connected via I2C.
-- SD card storage on SPI using CS pin D25.
+- SD card storage on SPI using CS pin D12.
 
 Retained concept notes from early planning:
 - Keep an on-screen alpha keyboard as the primary input surface.

@@ -11,7 +11,24 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
     - files/ (player and score data)
     - problem_banks/ (word/audio/image banks)
 3. Insert SD card with assets and data files.
+    - Picture prompts: `/sd/imgs/*.bmp`
+    - Audio prompts: `/sd/wavs/*.wav`
+        - Runtime data files in SD root:
+            - `/sd/players.txt` (active players)
+            - `/sd/tplayers.txt` (template players for reset)
+            - `/sd/scores.txt` (saved scores)
+        - Sample copies for these text files are in repo folder: `files/`
 4. Reset the board and verify the title screen appears.
+
+## Expected SD Card Layout
+```text
+/sd/
+    players.txt
+    tplayers.txt
+    scores.txt
+    imgs/
+    wavs/
+```
 
 ## Project Structure
 - code.py: Main entry point, UI, and game flow

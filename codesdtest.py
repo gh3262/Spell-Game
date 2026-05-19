@@ -24,7 +24,7 @@ CS_PIN = board.D6
 DC_PIN = board.D10
 LED_PIN = board.D11
 RST_PIN = board.D9
-SD_CS_PIN = board.D5
+SD_CS_PIN = board.D12
 T_CS_PIN = board.D12
 PIXEL_PIN = board.NEOPIXEL
 

@@ -12,6 +12,9 @@ import circuitpython_st7796s
 import xpt2046_circuitpython
 import adafruit_displayio_layout
 import adafruit_bitmap_font.bitmap_font as bitmap_font
+import adafruit_ds3231
+import adafruit_imageload
+import rtc
 import sdcardio
 import storage
 import json
@@ -30,15 +33,15 @@ TFT_BACKLIGHT = board.D6
 TOUCH_CS = board.D5
 
 # SD card socket chip-select pin.
-SD_CS = board.D25
+SD_CS = board.D12
 
 # MAX98357A I2S amplifier pins.
 AUDIO_BIT_CLOCK = board.A0
 AUDIO_WORD_SELECT = board.A1
 AUDIO_DATA = board.A3
 AUDIO_ENABLE = board.A2
-AUDIO_STARTUP_WAV = "/wavs/about.wav"
-AUDIO_WORDS_DIR = "/wavs"
+AUDIO_STARTUP_WAV = "/sd/wavs/about.wav"
+AUDIO_WORDS_DIR = "/sd/wavs"
 AUDIOMODE_IMAGE_CANDIDATES = ("/img/_audio.bmp", "/imgs/_audio.bmp")
 MODE_PICTURE = "picture"
 MODE_AUDIO = "audio"
@@ -60,6 +63,8 @@ VOWEL_TEXT_COLOR = 0xFFD400
 STATUS_TEXT_COLOR = 0xD0D7DE
 TITLE_TEXT_COLOR = 0xFFFFFF
 DARK_PANEL_COLOR = 0x2B2B2B
+WRONG_ANSWER_COLOR = 0xFF6B6B
+CORRECT_ANSWER_HINT_COLOR = 0x00C060
 KEY_ROW_COLOR_DARK = 0x2E567E
 KEY_ROW_COLOR_LIGHT = 0x3A6A99
 
@@ -92,6 +97,7 @@ FONT_PATHS = {
 }
 FONTS = {}
 BUTTON_REGISTRY = []
+STATUS_LINE_LABELS = []
 
 pages = None
 current_page_name = "main"
@@ -116,6 +122,44 @@ DEFAULT_STATS = {"total_games": 0, "total_correct": 0, "high_score": 0}
 
 audio_out = None
 audio_enable = None
+system_rtc = rtc.RTC()
+external_rtc = None
+last_status_second = None
+
+
+def build_status_line_text():
+    mode_text = "PIC" if current_mode == MODE_PICTURE else "AUD"
+
+    try:
+        now = system_rtc.datetime
+        hour_24 = now.tm_hour
+        hour_12 = hour_24 % 12
+        if hour_12 == 0:
+            hour_12 = 12
+        am_pm = "am" if hour_24 < 12 else "pm"
+        clock_text = "{:02d}:{:02d} {}".format(hour_12, now.tm_min, am_pm)
+    except Exception:
+        clock_text = "--:-- --"
+
+    return "{} | Q 00/00 | MODE {}".format(clock_text, mode_text)
+
+
+def update_status_line(force=False):
+    global last_status_second
+
+    try:
+        now = system_rtc.datetime
+        current_second = now.tm_sec
+    except Exception:
+        current_second = None
+
+    if not force and current_second == last_status_second:
+        return
+
+    last_status_second = current_second
+    status_text = build_status_line_text()
+    for status_label in STATUS_LINE_LABELS:
+        status_label.text = status_text
 
 
 def _set_cs_high(pin):
@@ -130,6 +174,48 @@ def prepare_spi_chip_selects():
     _set_cs_high(TFT_CS)
     _set_cs_high(TOUCH_CS)
     _set_cs_high(SD_CS)
+
+
+def init_real_time_clock():
+    global external_rtc
+
+    try:
+        i2c = board.STEMMA_I2C() if hasattr(board, "STEMMA_I2C") else board.I2C()
+        external_rtc = adafruit_ds3231.DS3231(i2c)
+        print("DS3231 initialized")
+    except Exception as exc:
+        external_rtc = None
+        print("DS3231 init failed: {}".format(exc))
+        return False
+
+    # Sync the CircuitPython system clock from the external RTC.
+    try:
+        rtc_time = external_rtc.datetime
+        system_rtc.datetime = rtc_time
+        print(
+            "System RTC synced: {:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}".format(
+                rtc_time.tm_year,
+                rtc_time.tm_mon,
+                rtc_time.tm_mday,
+                rtc_time.tm_hour,
+                rtc_time.tm_min,
+                rtc_time.tm_sec,
+            )
+        )
+    except Exception as exc:
+        print("RTC sync failed: {}".format(exc))
+
+    if False:  # change to True if you want to set the time!
+        #                     year, mon, date, hour, min, sec, wday, yday, isdst
+        t = time.struct_time((2026, 5, 18, 11, 51, 0, 1, -1, -1))
+        # you must set year, mon, date, hour, min, sec and weekday
+        # yearday is not supported, isdst can be set but we don't do anything with it at this time
+        print("Setting time to:", t)
+        system_rtc.datetime = t
+        if external_rtc is not None:
+            external_rtc.datetime = t
+
+    return True
 
 
 def load_fonts():
@@ -263,6 +349,17 @@ def play_result_feedback(is_correct):
         shutdown_audio_output()
 
 
+def play_button_feedback():
+    """Play a very short click tone for any button press."""
+    if not init_audio_output():
+        return False
+
+    try:
+        return play_beep_sequence(((960, 0.025, 0.0),))
+    finally:
+        shutdown_audio_output()
+
+
 def shutdown_audio_output():
     global audio_out, audio_enable
 
@@ -300,11 +397,30 @@ def clear_answer_text():
     refresh_answer_display()
 
 
-def update_keyboard_mode_label():
+def clear_last_answer_label():
+    """Blank the last-wrong-answer label (call when a new image loads)."""
     if keyboard_mode_label is not None:
-        keyboard_mode_label.text = "Mode: {}".format(
-            "Picture" if current_mode == MODE_PICTURE else "Audio"
-        )
+        keyboard_mode_label.text = ""
+
+
+def show_wrong_answer_label(typed_text):
+    """Show the player's incorrect spelling in light red."""
+    if keyboard_mode_label is not None:
+        keyboard_mode_label.color = WRONG_ANSWER_COLOR
+        keyboard_mode_label.text = typed_text
+
+
+def show_correct_answer_hint():
+    """Show the correct spelling in green so the player can type it in."""
+    answer = current_prompt_answer()
+    if keyboard_mode_label is not None and answer:
+        keyboard_mode_label.color = CORRECT_ANSWER_HINT_COLOR
+        keyboard_mode_label.text = answer.upper()
+
+
+def update_keyboard_mode_label():
+    """Called on mode change — clear the last-answer label for the new mode."""
+    clear_last_answer_label()
 
 
 def load_keyboard_image_paths(folder_path="/img"):
@@ -408,13 +524,8 @@ def clear_keyboard_panel_image():
             pass
         keyboard_image_tile = None
 
-    if keyboard_image_file is not None:
-        try:
-            keyboard_image_file.close()
-        except Exception:
-            pass
-        keyboard_image_file = None
-
+    # keyboard_image_file not used anymore (images loaded to memory)
+    keyboard_image_file = None
     keyboard_image_bitmap = None
 
 
@@ -448,11 +559,11 @@ def update_keyboard_panel_image():
 
         try:
             global keyboard_image_tile, keyboard_image_bitmap, keyboard_image_file
-            keyboard_image_file = open(audio_mode_image_path, "rb")
-            keyboard_image_bitmap = displayio.OnDiskBitmap(keyboard_image_file)
+            with open(audio_mode_image_path, "rb") as f:
+                keyboard_image_bitmap, keyboard_image_palette = adafruit_imageload.load(f)
             keyboard_image_tile = displayio.TileGrid(
                 keyboard_image_bitmap,
-                pixel_shader=keyboard_image_bitmap.pixel_shader,
+                pixel_shader=keyboard_image_palette,
                 x=IMAGE_PANEL_X,
                 y=IMAGE_PANEL_Y,
             )
@@ -472,11 +583,11 @@ def update_keyboard_panel_image():
 
     image_path = keyboard_image_paths[keyboard_image_index]
     try:
-        keyboard_image_file = open(image_path, "rb")
-        keyboard_image_bitmap = displayio.OnDiskBitmap(keyboard_image_file)
+        with open(image_path, "rb") as f:
+            keyboard_image_bitmap, keyboard_image_palette = adafruit_imageload.load(f)
         keyboard_image_tile = displayio.TileGrid(
             keyboard_image_bitmap,
-            pixel_shader=keyboard_image_bitmap.pixel_shader,
+            pixel_shader=keyboard_image_palette,
             x=IMAGE_PANEL_X,
             y=IMAGE_PANEL_Y,
         )
@@ -499,6 +610,7 @@ def cycle_keyboard_panel_image():
 
     keyboard_image_index = (keyboard_image_index + 1) % len(keyboard_image_paths)
     clear_answer_text()
+    clear_last_answer_label()
     return update_keyboard_panel_image()
 
 
@@ -510,6 +622,7 @@ def cycle_audio_prompt():
 
     audio_word_index = (audio_word_index + 1) % len(audio_word_paths)
     clear_answer_text()
+    clear_last_answer_label()
     return update_keyboard_panel_image()
 
 
@@ -520,6 +633,7 @@ def set_game_mode(mode_name):
     clear_answer_text()
     update_keyboard_mode_label()
     update_keyboard_panel_image()
+    update_status_line(force=True)
     print("Game mode set to {}".format(mode_name))
     return True
 
@@ -596,12 +710,13 @@ def add_shared_page_chrome(page_group, page_name):
 
     status_line = label.Label(
         FONTS["score"],
-        text="TIME --:-- | Q 00/00 | MODE ---",
+        text=build_status_line_text(),
         color=STATUS_TEXT_COLOR,
     )
     status_line.anchor_point = (0.5, 1.0)
     status_line.anchored_position = (DISPLAY_WIDTH // 2, STATUS_LINE_Y)
     page_group.append(status_line)
+    STATUS_LINE_LABELS.append(status_line)
 
 
 def build_main_page():
@@ -657,12 +772,7 @@ def build_keyboard_page():
     add_background(page)
     add_shared_page_chrome(page, "keyboard")
 
-    header = label.Label(FONTS["button"], text="Keyboard", color=TITLE_TEXT_COLOR)
-    header.anchor_point = (0.5, 0.5)
-    header.anchored_position = (DISPLAY_WIDTH // 2, 118)
-    page.append(header)
-
-    keyboard_mode_label = label.Label(FONTS["score"], text="Mode: Picture", color=STATUS_TEXT_COLOR)
+    keyboard_mode_label = label.Label(FONTS["score"], text="", color=WRONG_ANSWER_COLOR)
     keyboard_mode_label.anchor_point = (0.5, 0.5)
     keyboard_mode_label.anchored_position = (DISPLAY_WIDTH // 2, 162)
     page.append(keyboard_mode_label)
@@ -678,6 +788,20 @@ def build_keyboard_page():
         "keyboard_replay",
         "audio_replay",
         font_key="small_button",
+    )
+
+    add_button(
+        page,
+        "keyboard",
+        DISPLAY_WIDTH - FLOW_BUTTON_MARGIN - 88,
+        58,
+        88,
+        34,
+        "ANSWER",
+        "keyboard_answer",
+        "show_answer",
+        font_key="small_button",
+        fill_color=0x1A6B3A,
     )
 
     answer_display_label = label.Label(FONTS["button"], text="_", color=TITLE_TEXT_COLOR)
@@ -889,6 +1013,8 @@ def show_page(page_name):
 def handle_button_press(button):
     global answer_display_text
 
+    play_button_feedback()
+
     if button["role"] == "mode_picture" and current_page_name == "main":
         set_game_mode(MODE_PICTURE)
         show_page("keyboard")
@@ -921,6 +1047,11 @@ def handle_button_press(button):
             play_word_audio_for_current_image()
         return
 
+    if button["role"] == "show_answer" and current_page_name == "keyboard":
+        clear_answer_text()
+        show_correct_answer_hint()
+        return
+
     if current_page_name != "keyboard":
         return
 
@@ -936,14 +1067,18 @@ def handle_button_press(button):
         if expected_answer and typed_answer == expected_answer:
             print("Correct: {}".format(typed_answer))
             play_result_feedback(True)
+            clear_last_answer_label()
             cycle_keyboard_panel_image()
             if current_mode == MODE_AUDIO:
                 play_word_audio_for_current_image()
         else:
             print("Incorrect: '{}' expected '{}'".format(typed_answer, expected_answer))
+            show_wrong_answer_label(answer_display_text)
             play_result_feedback(False)
             clear_answer_text()
             update_keyboard_panel_image()
+            if current_mode == MODE_AUDIO:
+                play_word_audio_for_current_image()
     elif len(key_text) == 1 and key_text.isalpha():
         answer_display_text += key_text
 
@@ -962,13 +1097,19 @@ def main():
 
     load_fonts()
 
+    init_real_time_clock()
     prepare_spi_chip_selects()
+    time.sleep(0.05)  # Let CS lines settle before bringing up SPI bus.
     spi = board.SPI()
+    time.sleep(0.05)  # Let SPI bus stabilize before first device access.
     init_sd_card(spi)
-    load_keyboard_image_paths("/img")
+    load_keyboard_image_paths("/sd/imgs")
     load_audio_word_paths(AUDIO_WORDS_DIR)
+    time.sleep(0.1)   # Allow SD card bus activity to clear before display init.
     display = init_display(spi)
+    time.sleep(0.1)   # Allow display to finish init before touch controller setup.
     _touch = init_touch(spi)
+    time.sleep(0.05)  # Let touch controller settle.
 
     pages = PageLayout(x=0, y=0)
     pages.add_content(build_main_page(), page_name="main")
@@ -976,6 +1117,7 @@ def main():
     pages.add_content(build_scores_page(), page_name="scores")
     set_game_mode(MODE_PICTURE)
     show_page("main")
+    update_status_line(force=True)
 
     display.root_group = pages
     time.sleep(0.05)
@@ -1003,6 +1145,8 @@ def main():
             if pressed is not None and not touch_held:
                 handle_button_press(pressed)
                 touch_held = True
+
+        update_status_line()
 
         time.sleep(0.05)
 
