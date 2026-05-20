@@ -47,6 +47,9 @@ AUDIO_WORDS_DIR = "/sd/wavs"
 AUDIOMODE_IMAGE_CANDIDATES = ("/img/_audio.bmp", "/imgs/_audio.bmp")
 MODE_PICTURE = "picture"
 MODE_AUDIO = "audio"
+MUTE_TONES_IN_AUDIO_MODE = False
+ENABLE_WAV_FORMAT_CHECK = False
+WAV_TARGET_SAMPLE_RATES = (16000, 22050)
 
 DISPLAY_WIDTH = 320
 DISPLAY_HEIGHT = 480
@@ -126,6 +129,9 @@ keyboard_image_tile = None
 keyboard_image_bitmap = None
 keyboard_image_file = None
 keyboard_image_paths = []
+audio_mode_bitmap_cache = None
+audio_mode_palette_cache = None
+audio_mode_image_path_cache = None
 audio_word_index = 0
 audio_word_paths = []
 current_mode = MODE_PICTURE
@@ -140,6 +146,7 @@ DEFAULT_STATS = {"total_games": 0, "total_correct": 0, "high_score": 0}
 
 audio_out = None
 audio_enable = None
+audio_session_active = False
 system_rtc = rtc.RTC()
 external_rtc = None
 last_status_second = None
@@ -530,6 +537,10 @@ def finalize_startup_flow():
         )
     )
     print("[DEBUG] finalize_startup_flow completed")  # Confirm function exit
+    if startup_selected_mode == MODE_AUDIO:
+        start_audio_session()
+    else:
+        stop_audio_session()
     show_page("keyboard")
     show_current_game_word()
 
@@ -590,6 +601,7 @@ def advance_to_next_word():
     if game_word_index >= game_total:
         print("[DEBUG] Word limit reached. Ending game.")
         game_active = False
+        stop_audio_session()
         show_results_page()
     else:
         show_current_game_word()
@@ -756,6 +768,30 @@ def init_audio_output():
         return False
 
 
+def ensure_audio_output():
+    if audio_out is None:
+        return init_audio_output()
+
+    if audio_enable is not None:
+        try:
+            audio_enable.value = True
+        except Exception:
+            pass
+    return True
+
+
+def start_audio_session():
+    global audio_session_active
+    audio_session_active = True
+    return ensure_audio_output()
+
+
+def stop_audio_session():
+    global audio_session_active
+    audio_session_active = False
+    shutdown_audio_output()
+
+
 def play_startup_wav(file_path=AUDIO_STARTUP_WAV):
     if audio_out is None:
         return False
@@ -776,6 +812,47 @@ def play_startup_wav(file_path=AUDIO_STARTUP_WAV):
         if wave_file is not None:
             try:
                 wave_file.close()
+            except Exception:
+                pass
+
+
+def play_wav_file_isolated(file_path):
+    """Play a WAV with minimal runtime activity to reduce audio artifacts."""
+    if audio_out is None:
+        return False
+
+    wave_file = None
+    gc_was_enabled = False
+    try:
+        # Clear pending allocations first, then avoid GC pauses during stream playback.
+        gc.collect()
+        try:
+            gc_was_enabled = gc.isenabled()
+        except Exception:
+            gc_was_enabled = False
+        if gc_was_enabled:
+            gc.disable()
+
+        wave_file = open(file_path, "rb")
+        wave = audiocore.WaveFile(wave_file)
+        audio_out.play(wave)
+        while audio_out.playing:
+            # Keep loop lightweight while the DMA stream runs.
+            time.sleep(0.001)
+        print("Isolated WAV played: {}".format(file_path))
+        return True
+    except Exception as exc:
+        print("Isolated WAV playback failed for {}: {}".format(file_path, exc))
+        return False
+    finally:
+        if wave_file is not None:
+            try:
+                wave_file.close()
+            except Exception:
+                pass
+        if gc_was_enabled:
+            try:
+                gc.enable()
             except Exception:
                 pass
 
@@ -838,38 +915,44 @@ def play_word_audio_for_current_image():
         print("No prompt audio available for mode '{}'".format(current_mode))
         return False
 
-    if not init_audio_output():
+    if not ensure_audio_output():
         return False
 
-    try:
-        return play_startup_wav(wav_path)
-    finally:
+    played_ok = play_wav_file_isolated(wav_path)
+    if not audio_session_active:
         shutdown_audio_output()
+    return played_ok
 
 
 def play_result_feedback(is_correct):
-    if not init_audio_output():
+    if MUTE_TONES_IN_AUDIO_MODE and current_mode == MODE_AUDIO:
+        return True
+
+    if not ensure_audio_output():
         return False
 
-    try:
-        if is_correct:
-            sequence = ((660, 0.12, 0.05), (880, 0.18, 0.05))
-        else:
-            sequence = ((220, 0.16, 0.05), (180, 0.22, 0.05))
-        return play_beep_sequence(sequence)
-    finally:
+    if is_correct:
+        sequence = ((660, 0.12, 0.05), (880, 0.18, 0.05))
+    else:
+        sequence = ((220, 0.16, 0.05), (180, 0.22, 0.05))
+    result = play_beep_sequence(sequence)
+    if not audio_session_active:
         shutdown_audio_output()
+    return result
 
 
 def play_button_feedback():
     """Play a very short click tone for any button press."""
-    if not init_audio_output():
+    if MUTE_TONES_IN_AUDIO_MODE and current_mode == MODE_AUDIO:
+        return True
+
+    if not ensure_audio_output():
         return False
 
-    try:
-        return play_beep_sequence(((960, 0.025, 0.0),))
-    finally:
+    result = play_beep_sequence(((960, 0.025, 0.0),))
+    if not audio_session_active:
         shutdown_audio_output()
+    return result
 
 
 def shutdown_audio_output():
@@ -996,6 +1079,110 @@ def load_audio_word_paths(folder_path=AUDIO_WORDS_DIR):
     return True
 
 
+def _le_u16(data, offset):
+    return data[offset] | (data[offset + 1] << 8)
+
+
+def _le_u32(data, offset):
+    return (
+        data[offset]
+        | (data[offset + 1] << 8)
+        | (data[offset + 2] << 16)
+        | (data[offset + 3] << 24)
+    )
+
+
+def inspect_wav_header(file_path):
+    """Return parsed WAV header details or None when header cannot be parsed."""
+    try:
+        with open(file_path, "rb") as wav_file:
+            header = wav_file.read(512)
+    except Exception as exc:
+        print("WAV inspect read failed for {}: {}".format(file_path, exc))
+        return None
+
+    if len(header) < 12:
+        return None
+    if header[0:4] != b"RIFF" or header[8:12] != b"WAVE":
+        return None
+
+    index = 12
+    fmt_info = None
+    data_chunk_found = False
+
+    while index + 8 <= len(header):
+        chunk_id = header[index : index + 4]
+        chunk_size = _le_u32(header, index + 4)
+        chunk_data_start = index + 8
+        chunk_data_end = chunk_data_start + chunk_size
+
+        if chunk_id == b"fmt ":
+            if chunk_data_start + 16 > len(header):
+                return None
+            audio_format = _le_u16(header, chunk_data_start)
+            channel_count = _le_u16(header, chunk_data_start + 2)
+            sample_rate = _le_u32(header, chunk_data_start + 4)
+            bits_per_sample = _le_u16(header, chunk_data_start + 14)
+            fmt_info = {
+                "audio_format": audio_format,
+                "channels": channel_count,
+                "sample_rate": sample_rate,
+                "bits_per_sample": bits_per_sample,
+            }
+        elif chunk_id == b"data":
+            data_chunk_found = True
+
+        step = 8 + chunk_size
+        if step % 2 == 1:
+            step += 1
+        index += step
+
+    if fmt_info is None:
+        return None
+
+    fmt_info["has_data_chunk"] = data_chunk_found
+    return fmt_info
+
+
+def validate_audio_prompt_formats():
+    """Print warnings for WAV files that are outside preferred playback format."""
+    if not audio_word_paths:
+        print("WAV format check skipped: no audio prompts loaded")
+        return
+
+    warning_count = 0
+    for wav_path in audio_word_paths:
+        details = inspect_wav_header(wav_path)
+        if details is None:
+            warning_count += 1
+            print("WAV format warning: {} (unreadable or non-standard header)".format(wav_path))
+            continue
+
+        is_pcm = details["audio_format"] == 1
+        is_mono = details["channels"] == 1
+        is_16_bit = details["bits_per_sample"] == 16
+        is_target_rate = details["sample_rate"] in WAV_TARGET_SAMPLE_RATES
+        has_data = details.get("has_data_chunk", False)
+
+        if not (is_pcm and is_mono and is_16_bit and is_target_rate and has_data):
+            warning_count += 1
+            print(
+                "WAV format warning: {} fmt={} ch={} rate={} bits={} data_chunk={}".format(
+                    wav_path,
+                    details["audio_format"],
+                    details["channels"],
+                    details["sample_rate"],
+                    details["bits_per_sample"],
+                    has_data,
+                )
+            )
+
+    if warning_count == 0:
+        print("WAV format check passed for {} files".format(len(audio_word_paths)))
+    else:
+        print("WAV format check: {} warning(s) across {} files".format(warning_count, len(audio_word_paths)))
+
+
 def current_image_answer():
     # During gameplay, use the randomized game_word_list
     if game_active and game_word_list and game_word_index < len(game_word_list):
@@ -1067,33 +1254,42 @@ def resolve_audio_mode_image_path():
 
 
 def update_keyboard_panel_image():
+    global keyboard_image_tile, keyboard_image_bitmap, keyboard_image_file
+    global audio_mode_bitmap_cache, audio_mode_palette_cache, audio_mode_image_path_cache
+
     if keyboard_page_group is None:
         return False
 
     if current_mode == MODE_AUDIO:
         clear_keyboard_panel_image()
-        audio_mode_image_path = resolve_audio_mode_image_path()
-        if audio_mode_image_path is None:
-            print("Audio mode image not found (tried: {})".format(AUDIOMODE_IMAGE_CANDIDATES))
-            return False
+        if audio_mode_bitmap_cache is None or audio_mode_palette_cache is None:
+            audio_mode_image_path = resolve_audio_mode_image_path()
+            if audio_mode_image_path is None:
+                print("Audio mode image not found (tried: {})".format(AUDIOMODE_IMAGE_CANDIDATES))
+                return False
 
-        try:
-            global keyboard_image_tile, keyboard_image_bitmap, keyboard_image_file
-            with open(audio_mode_image_path, "rb") as f:
-                keyboard_image_bitmap, keyboard_image_palette = adafruit_imageload.load(f)
-            keyboard_image_tile = displayio.TileGrid(
-                keyboard_image_bitmap,
-                pixel_shader=keyboard_image_palette,
-                x=IMAGE_PANEL_X,
-                y=IMAGE_PANEL_Y,
-            )
-            keyboard_page_group.append(keyboard_image_tile)
-            print("Audio mode image loaded: {}".format(audio_mode_image_path))
-            return True
-        except Exception as exc:
-            print("Audio mode image load failed for {}: {}".format(audio_mode_image_path, exc))
-            clear_keyboard_panel_image()
-            return False
+            try:
+                with open(audio_mode_image_path, "rb") as f:
+                    audio_mode_bitmap_cache, audio_mode_palette_cache = adafruit_imageload.load(f)
+                audio_mode_image_path_cache = audio_mode_image_path
+                print("Audio mode image cached: {}".format(audio_mode_image_path))
+            except Exception as exc:
+                print("Audio mode image load failed for {}: {}".format(audio_mode_image_path, exc))
+                audio_mode_bitmap_cache = None
+                audio_mode_palette_cache = None
+                audio_mode_image_path_cache = None
+                clear_keyboard_panel_image()
+                return False
+
+        keyboard_image_bitmap = audio_mode_bitmap_cache
+        keyboard_image_tile = displayio.TileGrid(
+            audio_mode_bitmap_cache,
+            pixel_shader=audio_mode_palette_cache,
+            x=IMAGE_PANEL_X,
+            y=IMAGE_PANEL_Y,
+        )
+        keyboard_page_group.append(keyboard_image_tile)
+        return True
 
     if not keyboard_image_paths:
         clear_keyboard_panel_image()
@@ -1772,6 +1968,7 @@ def handle_button_press(button):
             return
 
     if button["role"] == "flow_back" and current_page_name == "keyboard":
+        stop_audio_session()
         show_page("main")
         return
 
@@ -1820,9 +2017,13 @@ def handle_button_press(button):
             show_wrong_answer_label(answer_display_text)
             play_result_feedback(False)
             clear_answer_text()
-            update_keyboard_panel_image()
-            if current_mode == MODE_AUDIO:
-                play_word_audio_for_current_image()
+            if game_active:
+                # Keep the displayed prompt aligned with the current randomized game word.
+                show_current_game_word()
+            else:
+                update_keyboard_panel_image()
+                if current_mode == MODE_AUDIO:
+                    play_word_audio_for_current_image()
     elif len(key_text) == 1 and key_text.isalpha():
         answer_display_text += key_text
 
@@ -1849,6 +2050,8 @@ def main():
     init_sd_card(spi)
     load_keyboard_image_paths("/sd/imgs")
     load_audio_word_paths(AUDIO_WORDS_DIR)
+    if ENABLE_WAV_FORMAT_CHECK:
+        validate_audio_prompt_formats()
     time.sleep(0.1)   # Allow SD card bus activity to clear before display init.
     display = init_display(spi)
     time.sleep(0.1)   # Allow display to finish init before touch controller setup.
