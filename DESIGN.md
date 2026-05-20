@@ -6,6 +6,7 @@ A spelling game for a 4" 480x320 TFT touchscreen, currently running in portrait 
 Active runtime asset locations on SD card:
 - Picture prompts: `/sd/imgs/*.bmp`
 - Audio prompts: `/sd/wavs/*.wav`
+    - Underscore-prefixed WAVs are reserved for startup/system use and are excluded from gameplay prompt loading.
 
 Runtime data files on SD card root:
 - `/sd/players.txt` (current active player list)
@@ -18,15 +19,18 @@ Repository sample data files:
 ## Current Status
 - Display, touch, and page navigation are working in the main app.
 - The UI scaffold is live with `main`, `keyboard`, and `scores` pages.
+- Startup display bring-up now releases any previous display bus ownership before SPI chip-select setup.
 - Main page now includes mode selection buttons: Picture and Audio.
+- Player selection now pages names in groups of three, with the fourth button switching between `MORE` and `NEW` based on remaining pages.
 - Picture mode loads BMP files from `/sd/imgs` and derives the expected answer from the image filename.
-- Audio mode loads WAV prompts from `/sd/wavs`, plays the active file, and derives the expected answer from the WAV filename.
+- Audio mode loads WAV prompts from `/sd/wavs`, ignores underscore-prefixed reserved files, plays the active file, and derives the expected answer from the WAV filename.
 - In Audio mode, the keyboard panel displays a fixed speaker image (`/img/_audio.bmp`, with fallback `/imgs/_audio.bmp`).
 - Entered answers are checked on-device; correct answers advance prompts and incorrect answers clear current entry.
 - Success/fail beep feedback is implemented on `ENTER`.
 - Replay button is implemented on the keyboard page for Audio mode.
 - SD card support is wired for CS `D12` and mounts at `/sd` in the current build.
-- RTC-driven status text, persistent scores/stats, and full game-engine integration are still pending.
+- RTC-driven status text is active; when the DS3231 is absent, boot falls back to `2026-01-01 13:00:00`.
+- Persistent scores/stats and full game-engine integration are still pending.
 
 ## Session Updates (2026-05-19)
 - Startup flow now supports staged configuration before play:
@@ -42,6 +46,14 @@ Repository sample data files:
 - Skip path is integrated into round progression and skip counting.
 - Audio-mode duplicate prompt playback was fixed by removing secondary replay calls after advancement.
 - Runtime import set was repaired after refactor drift so startup and hardware init paths resolve correctly.
+
+## Session Updates (2026-05-20)
+- Startup sequencing was tightened so `displayio.release_displays()` runs before SPI chip-select setup, preventing `D11 in use` failures at boot.
+- DS3231 boot failure now seeds the CircuitPython RTC with `2026-01-01 13:00:00` so time/status formatting remains usable without external RTC hardware.
+- Startup audio now randomly selects one `_start*.wav` greeting clip from the reserved startup pool.
+- The normal startup beep/tone verification path was removed.
+- Gameplay WAV discovery now excludes underscore-prefixed files, matching the reserved-asset rule used for BMP prompt loading.
+- Player selection paging now surfaces additional name pages through a `MORE` action before exposing `NEW` on the final page.
 
 ## Deployment Checklist
 1. Save and deploy updated `code.py` to board root.
@@ -63,7 +75,9 @@ Repository sample data files:
 4. Boot validation:
     - RTC init logs expected state
     - SD mounts without retries/failures
+    - Display init completes without CS pin conflicts
     - UI scaffold initializes (`main`, `keyboard`, `scores`)
+    - One reserved startup WAV plays
 5. Gameplay validation:
     - Picture mode uses randomized round list and stops at selected word count
     - Audio mode plays one prompt per word (no duplicate play), advances correctly, and respects round limit
@@ -76,7 +90,8 @@ Repository sample data files:
 2. Confirm bring-up sequence:
     - RTC init path logs expected state
     - SD mount succeeds
-    - Startup WAV + beep complete
+    - Display init completes without `D11 in use`
+    - One startup `_start*.wav` clip completes
     - UI scaffold initialized
 3. Execute Picture mode smoke test:
     - Player -> Picture -> Random -> 10
@@ -117,7 +132,7 @@ Repository sample data files:
 - The app runs in portrait mode using a `320x480` logical layout.
 - **Main Page:** title screen with shared navigation chrome and mode selection buttons (Picture/Audio).
 - **Keyboard Page:** 4x7 grid (26 letters + `ENTER` + `BkSp`), `74x35` keys, `2px` gaps, alternating blue row fills, yellow vowel labels, green `ENTER`, and yellow `BkSp`.
-- **Image Panel:** `96x96` area near the top of the keyboard page.
+- **Image Panel:** `120x120` area near the top of the keyboard page.
 - Picture mode displays the current prompt image.
 - Audio mode displays a fixed speaker image.
 - **Answer Line:** centered near the top of the keyboard page and updated live as letters are pressed.
@@ -158,17 +173,20 @@ Repository sample data files:
 - Page-based UI scaffold
 - BMP image loading from `/sd/imgs`
 - WAV audio prompt loading from `/sd/wavs`
+- Reserved `_*.wav` files excluded from gameplay prompt selection
 - Filename-based spelling checks (image mode and audio mode)
 - Flow buttons for navigation
 - Audio replay button on keyboard page
 - Audio success/fail beep feedback
-- Startup WAV + beep hardware verification path
+- Random startup greeting WAV selected from reserved `_start*.wav` files
 - Planned: score tracking and storage
 - Planned: multiple game modes beyond the current visual prototype
 - Planned: skip/question pacing controls
 
 ## Assets
 - Prompt assets are expected on the SD card at `/sd/imgs` and `/sd/wavs`
+- Images should be 120x120 .bmp files
+- Audio prompt files should be `.wav`; underscore-prefixed WAVs are treated as reserved system assets and excluded from gameplay prompt rotation
 - Reserved audio-mode speaker image is currently loaded from internal storage candidates: `/img/_audio.bmp` then `/imgs/_audio.bmp`
 - Problem banks (audio, images, choices)
 - Fonts
@@ -197,8 +215,10 @@ Repo-side sample files for SD root data:
 ## Notes From Current Bring-Up
 - SD behavior was initially inconsistent because one card/adapter combination was unreliable. A known-good card now mounts successfully on `D12`.
 - The current code uses `sdcardio` and retries SD initialization cleanly without leaving the CS pin busy after a failed attempt.
+- Startup now releases any existing display bus before reasserting SPI chip-select pins, preventing the `D11 in use` failure seen during bring-up.
 - Audio hardware is confirmed working with MAX98357A using `A0/A1/A3` plus `A2` enable control.
-- WAV playback plus generated beep sequences are both confirmed working without breaking touchscreen input.
+- Startup now plays one random reserved `_start*.wav` clip, while gameplay excludes underscore-prefixed WAVs from prompt rotation.
+- WAV playback plus gameplay feedback beeps are both confirmed working without breaking touchscreen input.
 - Picture mode excludes underscore-prefixed BMP files so reserved images (for example `_audio.bmp`) are not used as Picture prompts.
 
 ## File Structure

@@ -13,6 +13,7 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
 3. Insert SD card with assets and data files.
     - Picture prompts: `/sd/imgs/*.bmp`
     - Audio prompts: `/sd/wavs/*.wav`
+        - Underscore-prefixed WAVs are reserved for startup/system use and are ignored during gameplay prompt loading.
         - Runtime data files in SD root:
             - `/sd/players.txt` (active players)
             - `/sd/tplayers.txt` (template players for reset)
@@ -39,6 +40,14 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
 - Audio prompt double-play in Audio mode was fixed so each prompt is played once during active gameplay.
 - Critical runtime imports were restored/verified after refactors (display, touch, RTC, SD, audio, font, and utility modules).
 
+## Session Updates (2026-05-20)
+- Startup display initialization now releases display resources before SPI chip-select setup, avoiding the `D11 in use` failure.
+- If the DS3231 is not present, the system RTC now falls back to `2026-01-01 13:00:00`.
+- Startup audio now randomly selects one reserved `_start*.wav` greeting clip.
+- The startup beep/tone test was removed from the normal boot path.
+- Gameplay audio prompt loading now ignores underscore-prefixed WAVs, matching the reserved-asset rule already used for underscore-prefixed BMPs.
+- Player selection now pages through names using `MORE` until the final page, where the fourth button becomes `NEW`.
+
 ## Deployment Checklist
 1. Confirm local `code.py` saves cleanly and contains no syntax errors.
 2. Copy updated app code to the board (`D:\code.py`).
@@ -58,10 +67,11 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
 5. Verify SD card asset folders exist and are populated:
     - `/sd/imgs/*.bmp`
     - `/sd/wavs/*.wav`
+    - Reserved startup/system clips may exist as `/sd/wavs/_*.wav`; these are excluded from gameplay prompt lists
 6. Hardware sanity check after reboot:
     - Display initializes
     - Touch responds
-    - Startup WAV + beep path runs
+    - One startup `_start*.wav` clip plays
     - RTC initializes (or logs a clear fallback message)
 7. Functional smoke test:
     - Picture mode: select 10 words, confirm randomized list behavior and stop at 10
@@ -73,7 +83,7 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
 ## Known Good Test Script (2-3 Minutes)
 1. Power-cycle or reset the board.
 2. Wait for startup verification:
-    - Startup WAV and beep sequence complete
+    - One startup `_start*.wav` clip completes
     - UI scaffold reports ready
 3. Start a Picture round:
     - Select a player

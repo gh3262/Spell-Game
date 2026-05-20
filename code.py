@@ -42,7 +42,17 @@ AUDIO_BIT_CLOCK = board.A0
 AUDIO_WORD_SELECT = board.A1
 AUDIO_DATA = board.A3
 AUDIO_ENABLE = board.A2
-AUDIO_STARTUP_WAV = "/sd/wavs/about.wav"
+AUDIO_STARTUP_WAVS = (
+    "/sd/wavs/_start_lpag.wav",
+    "/sd/wavs/_start_hello1.wav",
+    "/sd/wavs/_start_hello2.wav",
+    "/sd/wavs/_start_hello3.wav",
+    "/sd/wavs/_start_helloletsplay.wav",
+    "/sd/wavs/_start_hisif.wav",
+    "/sd/wavs/_start_hithere.wav",
+    "/sd/wavs/_start_lets spell.wav",
+    "/sd/wavs/_start_letshavefun.wav",
+)
 AUDIO_WORDS_DIR = "/sd/wavs"
 AUDIOMODE_IMAGE_CANDIDATES = ("/img/_audio.bmp", "/imgs/_audio.bmp")
 MODE_PICTURE = "picture"
@@ -424,7 +434,11 @@ def update_startup_ui():
             else:
                 _clear_start_option(idx)
 
-        _set_start_option(3, "NEW", {"kind": "new_player", "value": "NEW"}, MATH_GAME_ORANGE)
+        next_index = first_index + 3
+        if next_index < len(startup_player_names):
+            _set_start_option(3, "MORE", {"kind": "more_players", "value": startup_player_page + 1}, MATH_GAME_GOLD)
+        else:
+            _set_start_option(3, "NEW", {"kind": "new_player", "value": "NEW"}, MATH_GAME_ORANGE)
         return
 
     if startup_step == STARTUP_STEP_MODE:
@@ -635,6 +649,11 @@ def handle_startup_option(slot_index):
         show_page("name_entry")
         return
 
+    if action_kind == "more_players":
+        startup_player_page = action_value
+        update_startup_ui()
+        return
+
     if action_kind == "mode":
         startup_selected_mode = action_value
         _goto_next_startup_step()
@@ -710,6 +729,9 @@ def init_real_time_clock():
     except Exception as exc:
         external_rtc = None
         print("DS3231 init failed: {}".format(exc))
+        fallback_time = time.struct_time((2026, 1, 1, 13, 0, 0, 3, 1, -1))
+        system_rtc.datetime = fallback_time
+        print("System RTC set to fallback time: 2026-01-01 13:00:00")
         return False
 
     # Sync the CircuitPython system clock from the external RTC.
@@ -792,9 +814,12 @@ def stop_audio_session():
     shutdown_audio_output()
 
 
-def play_startup_wav(file_path=AUDIO_STARTUP_WAV):
+def play_startup_wav(file_path=None):
     if audio_out is None:
         return False
+
+    if file_path is None:
+        file_path = random.choice(AUDIO_STARTUP_WAVS)
 
     wave_file = None
     try:
@@ -1062,7 +1087,7 @@ def load_audio_word_paths(folder_path=AUDIO_WORDS_DIR):
 
     wav_names = []
     for name in names:
-        if name.lower().endswith(".wav"):
+        if name.lower().endswith(".wav") and not name.startswith("_"):
             wav_names.append(name)
 
     wav_names.sort()
@@ -2032,31 +2057,36 @@ def handle_button_press(button):
 
 def main():
     global pages
-
     displayio.release_displays()
-
+    print("Displays released.")
     backlight = digitalio.DigitalInOut(TFT_BACKLIGHT)
     backlight.direction = digitalio.Direction.OUTPUT
     # Keep panel dark until the first frame is fully initialized.
     backlight.value = False
-
-    load_fonts()
-
-    init_real_time_clock()
+    print("Backlight pin initialized, backlight off.")
     prepare_spi_chip_selects()
-    time.sleep(0.05)  # Let CS lines settle before bringing up SPI bus.
+    print("SPI chip select pins initialized.")
+    #time.sleep(.05)  # Let CS lines settle before bringing up SPI bus.
     spi = board.SPI()
-    time.sleep(0.05)  # Let SPI bus stabilize before first device access.
+    #time.sleep(.05)  # Let SPI bus stabilize before first device access.
     init_sd_card(spi)
+    print("SD card initialized and mounted.")
+    time.sleep(.05)   # Allow SD card bus activity to clear before display init.
+    display = init_display(spi)
+    print("Display initialized: {}x{} @ {} baud".format(DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_SPI_BAUDRATE))
+    time.sleep(.05)   # Allow display to finish init before touch controller setup.
+    _touch = init_touch(spi)
+    print("Touch controller initialized: {}x{} mapped to {}x{}".format(_touch.width, _touch.height, DISPLAY_WIDTH, DISPLAY_HEIGHT))
+    time.sleep(.05)  # Let touch controller settle.
+    load_fonts()
+    print("Fonts loaded: {}".format(", ".join(FONTS.keys())))
+    init_real_time_clock()
+    print("Real-time clock initialized.")
     load_keyboard_image_paths("/sd/imgs")
     load_audio_word_paths(AUDIO_WORDS_DIR)
+    print("Media file paths loaded: {} images, {} audio prompts".format(len(keyboard_image_paths), len(audio_word_paths)))
     if ENABLE_WAV_FORMAT_CHECK:
         validate_audio_prompt_formats()
-    time.sleep(0.1)   # Allow SD card bus activity to clear before display init.
-    display = init_display(spi)
-    time.sleep(0.1)   # Allow display to finish init before touch controller setup.
-    _touch = init_touch(spi)
-    time.sleep(0.05)  # Let touch controller settle.
 
     pages = PageLayout(x=0, y=0)
     pages.add_content(build_main_page(), page_name="main")
@@ -2070,11 +2100,10 @@ def main():
     update_status_line(force=True)
 
     display.root_group = pages
-    time.sleep(0.05)
+    time.sleep(.05)
     backlight.value = True
     if init_audio_output():
         play_startup_wav()
-        play_startup_beep_sequence()
         shutdown_audio_output()
     print("UI scaffold ready: main, keyboard, and scores pages.")
 
