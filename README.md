@@ -41,6 +41,10 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
 - Critical runtime imports were restored/verified after refactors (display, touch, RTC, SD, audio, font, and utility modules).
 
 ## Session Updates (2026-05-20)
+- Placeholder image during startup explicitly set to `/sd/imgs/_sbee.bmp`.
+- Removed unused `MODE` button from the startup screen.
+- Fixed Audio mode replay issue where the last word would replay after the game ended.
+- Improved hint/wrong-answer label handling to clear stale text when advancing prompts.
 - Startup display initialization now releases display resources before SPI chip-select setup, avoiding the `D11 in use` failure.
 - If the DS3231 is not present, the system RTC now falls back to `2026-01-01 13:00:00`.
 - Startup audio now randomly selects one reserved `_start*.wav` greeting clip.

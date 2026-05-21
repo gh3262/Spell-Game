@@ -54,6 +54,10 @@ Repository sample data files:
 - The normal startup beep/tone verification path was removed.
 - Gameplay WAV discovery now excludes underscore-prefixed files, matching the reserved-asset rule used for BMP prompt loading.
 - Player selection paging now surfaces additional name pages through a `MORE` action before exposing `NEW` on the final page.
+- Placeholder image during startup explicitly set to `/sd/imgs/_sbee.bmp`.
+- Removed unused `MODE` button from the startup screen.
+- Fixed Audio mode replay issue where the last word would replay after the game ended.
+- Improved hint/wrong-answer label handling to clear stale text when advancing prompts.
 
 ## Deployment Checklist
 1. Save and deploy updated `code.py` to board root.

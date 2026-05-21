@@ -205,6 +205,24 @@ name_entry_text_label = None
 name_entry_page_label = None
 name_entry_dynamic_buttons = []
 
+game_word_list = []
+game_word_index = 0
+game_total = 0
+game_correct = 0
+game_correct_total = 0
+game_skipped = 0
+game_hints_used = 0
+game_current_word_hint_used = False
+game_hint_word_index = -1
+game_active = False
+
+results_player_label = None
+results_total_label = None
+results_attempted_label = None
+results_correct_no_hint_label = None
+results_correct_with_hint_label = None
+results_percent_no_hint_label = None
+
 
 def _normalize_player_name(name_text):
     return name_text.strip()
@@ -390,6 +408,14 @@ def _set_button_visual(button_info, text, fill_color, text_color=BUTTON_TEXT_COL
     button_info["tile"].pixel_shader[0] = fill_color
 
 
+def _set_page_flow_back_button_text(page_name, text, fill_color=BUTTON_FILL_COLOR):
+    for button in BUTTON_REGISTRY:
+        if button["page"] == page_name and button["role"] == "flow_back":
+            _set_button_visual(button, text, fill_color)
+            return True
+    return False
+
+
 def _set_start_option(slot_index, text, action_data, fill_color):
     startup_option_actions[slot_index] = action_data
     _set_button_visual(startup_option_buttons[slot_index], text, fill_color)
@@ -521,9 +547,27 @@ def _select_random_unique_items(items, count):
     return selected
 
 
+def reset_game_session_state(clear_word_list=False):
+    global game_word_list, game_word_index, game_total, game_correct, game_correct_total
+    global game_skipped, game_hints_used, game_current_word_hint_used, game_hint_word_index, game_active
+
+    if clear_word_list:
+        game_word_list = []
+    game_word_index = 0
+    game_total = 0
+    game_correct = 0
+    game_correct_total = 0
+    game_skipped = 0
+    game_hints_used = 0
+    game_current_word_hint_used = False
+    game_hint_word_index = -1
+    game_active = False
+
+
 def finalize_startup_flow():
     print("[DEBUG] Entered finalize_startup_flow")  # Confirm function entry
-    global game_word_list, game_word_index, game_total, game_correct, game_skipped, game_active
+    global game_word_list, game_word_index, game_total, game_correct, game_correct_total, game_skipped, game_active
+    global game_hints_used, game_current_word_hint_used, game_hint_word_index
     set_game_mode(startup_selected_mode)
     # Select the correct asset list
     if startup_selected_mode == MODE_PICTURE:
@@ -540,7 +584,11 @@ def finalize_startup_flow():
     game_word_index = 0
     game_total = word_count
     game_correct = 0
+    game_correct_total = 0
     game_skipped = 0
+    game_hints_used = 0
+    game_current_word_hint_used = False
+    game_hint_word_index = -1
     game_active = True
     print(
         "Start game: player='{}' mode='{}' prompt='{}' words={}".format(
@@ -555,6 +603,7 @@ def finalize_startup_flow():
         start_audio_session()
     else:
         stop_audio_session()
+    _set_page_flow_back_button_text("keyboard", "QUIT", MATH_GAME_ORANGE)
     show_page("keyboard")
     show_current_game_word()
 
@@ -562,10 +611,18 @@ def finalize_startup_flow():
 def show_current_game_word():
     """Update the UI to show the current word/image/audio."""
     global game_word_list, game_word_index, game_active, keyboard_image_bitmap, keyboard_image_tile
+    global game_current_word_hint_used, game_hint_word_index
     print(f"[DEBUG] Showing current word. Index: {game_word_index}, Active: {game_active}")
     if not game_active or game_word_index >= len(game_word_list):
         print("[DEBUG] No active game or index out of range.")
         return
+
+    if game_word_index != game_hint_word_index:
+        game_current_word_hint_used = False
+        game_hint_word_index = game_word_index
+
+    clear_last_answer_label()
+
     # Set the current asset index for answer checking and display
     if current_mode == MODE_PICTURE:
         # Load and display the image directly from the randomized list
@@ -599,6 +656,7 @@ def show_current_game_word():
             print("Failed to play audio {}: {}".format(audio_path, exc))
     clear_answer_text()
     refresh_answer_display()
+    update_status_line(force=True)
 
 
 def handle_skip_word():
@@ -606,6 +664,7 @@ def handle_skip_word():
     if game_active:
         game_skipped += 1
         advance_to_next_word()
+        update_status_line(force=True)
 
 
 def advance_to_next_word():
@@ -616,6 +675,7 @@ def advance_to_next_word():
         print("[DEBUG] Word limit reached. Ending game.")
         game_active = False
         stop_audio_session()
+        update_status_line(force=True)
         show_results_page()
     else:
         show_current_game_word()
@@ -671,8 +731,6 @@ def handle_startup_option(slot_index):
 
 
 def build_status_line_text():
-    mode_text = "PIC" if current_mode == MODE_PICTURE else "AUD"
-
     try:
         now = system_rtc.datetime
         hour_24 = now.tm_hour
@@ -684,7 +742,19 @@ def build_status_line_text():
     except Exception:
         clock_text = "--:-- --"
 
-    return "{} | Q 00/00 | MODE {}".format(clock_text, mode_text)
+    remaining_questions = 0
+    if game_active:
+        remaining_questions = game_total - game_word_index
+        if remaining_questions < 0:
+            remaining_questions = 0
+
+    return "{} | R {} | C {} | H {} | S {}".format(
+        clock_text,
+        remaining_questions,
+        game_correct,
+        game_hints_used,
+        game_skipped,
+    )
 
 
 def update_status_line(force=False):
@@ -1036,6 +1106,20 @@ def show_correct_answer_hint():
     if keyboard_mode_label is not None and answer:
         keyboard_mode_label.color = CORRECT_ANSWER_HINT_COLOR
         keyboard_mode_label.text = answer.upper()
+
+
+def mark_hint_for_current_word():
+    global game_hints_used, game_current_word_hint_used
+
+    if not game_active:
+        return
+
+    if game_current_word_hint_used:
+        return
+
+    game_current_word_hint_used = True
+    game_hints_used += 1
+    update_status_line(force=True)
 
 
 def update_keyboard_mode_label():
@@ -1571,20 +1655,6 @@ def build_main_page():
         )
     )
 
-    add_button(
-        page,
-        "main",
-        DISPLAY_WIDTH - FLOW_BUTTON_MARGIN - 88,
-        58,
-        88,
-        34,
-        "MODE",
-        "main_mode_hint",
-        "main_mode_hint",
-        font_key="small_button",
-        fill_color=0x2F3A44,
-    )
-
     update_startup_ui()
     return page
 
@@ -1762,6 +1832,9 @@ def build_name_entry_page():
 
 
 def build_scores_page():
+    global results_player_label, results_total_label, results_attempted_label
+    global results_correct_no_hint_label, results_correct_with_hint_label, results_percent_no_hint_label
+
     page = displayio.Group()
     add_background(page)
     add_shared_page_chrome(page, "scores")
@@ -1770,7 +1843,74 @@ def build_scores_page():
     header.anchor_point = (0.5, 0.5)
     header.anchored_position = (DISPLAY_WIDTH // 2, 95)
     page.append(header)
+
+    results_player_label = label.Label(FONTS["score"], text="Player: -", color=STATUS_TEXT_COLOR)
+    results_player_label.anchor_point = (0.0, 0.5)
+    results_player_label.anchored_position = (24, 132)
+    page.append(results_player_label)
+
+    results_total_label = label.Label(FONTS["score"], text="Total Problems: 0", color=STATUS_TEXT_COLOR)
+    results_total_label.anchor_point = (0.0, 0.5)
+    results_total_label.anchored_position = (24, 160)
+    page.append(results_total_label)
+
+    results_attempted_label = label.Label(FONTS["score"], text="Attempted: 0", color=STATUS_TEXT_COLOR)
+    results_attempted_label.anchor_point = (0.0, 0.5)
+    results_attempted_label.anchored_position = (24, 188)
+    page.append(results_attempted_label)
+
+    results_correct_no_hint_label = label.Label(FONTS["score"], text="Correct (No Hint): 0", color=STATUS_TEXT_COLOR)
+    results_correct_no_hint_label.anchor_point = (0.0, 0.5)
+    results_correct_no_hint_label.anchored_position = (24, 216)
+    page.append(results_correct_no_hint_label)
+
+    results_correct_with_hint_label = label.Label(FONTS["score"], text="Correct (With Hint): 0", color=STATUS_TEXT_COLOR)
+    results_correct_with_hint_label.anchor_point = (0.0, 0.5)
+    results_correct_with_hint_label.anchored_position = (24, 244)
+    page.append(results_correct_with_hint_label)
+
+    results_percent_no_hint_label = label.Label(FONTS["score"], text="% No Hint: 0%", color=VOWEL_TEXT_COLOR)
+    results_percent_no_hint_label.anchor_point = (0.0, 0.5)
+    results_percent_no_hint_label.anchored_position = (24, 272)
+    page.append(results_percent_no_hint_label)
+
     return page
+
+
+def show_results_page():
+    attempted = game_total - game_skipped
+    if attempted < 0:
+        attempted = 0
+
+    correct_no_hint = game_correct
+    correct_with_hint = game_correct_total - game_correct
+    if correct_with_hint < 0:
+        correct_with_hint = 0
+
+    if attempted > 0:
+        # Requested formula: (attempted - hints) / attempted
+        raw_percent_no_hint = ((attempted - game_hints_used) * 100) / attempted
+        if raw_percent_no_hint < 0:
+            raw_percent_no_hint = 0
+    else:
+        raw_percent_no_hint = 0
+
+    if results_player_label is not None:
+        results_player_label.text = "Player: {}".format(startup_selected_player if startup_selected_player else "-")
+    if results_total_label is not None:
+        results_total_label.text = "Total Problems: {}".format(game_total)
+    if results_attempted_label is not None:
+        results_attempted_label.text = "Attempted: {}".format(attempted)
+    if results_correct_no_hint_label is not None:
+        results_correct_no_hint_label.text = "Correct (No Hint): {}".format(correct_no_hint)
+    if results_correct_with_hint_label is not None:
+        results_correct_with_hint_label.text = "Correct (With Hint): {}".format(correct_with_hint)
+    if results_percent_no_hint_label is not None:
+        results_percent_no_hint_label.text = "% No Hint: {:.1f}%".format(raw_percent_no_hint)
+
+    _set_page_flow_back_button_text("scores", "HOME", MATH_GAME_ORANGE)
+    _set_page_flow_back_button_text("keyboard", "BACK", BUTTON_FILL_COLOR)
+    show_page("scores")
 
 
 def init_display(spi):
@@ -1917,7 +2057,7 @@ def show_page(page_name):
 
 def handle_button_press(button):
     global answer_display_text, startup_player_page, startup_step, startup_new_player_text
-    global game_active, game_word_index, game_total, game_correct
+    global game_active, game_word_index, game_total, game_correct, game_correct_total
 
     play_button_feedback()
 
@@ -1993,8 +2133,37 @@ def handle_button_press(button):
             return
 
     if button["role"] == "flow_back" and current_page_name == "keyboard":
+        reset_game_session_state()
         stop_audio_session()
+        startup_step = STARTUP_STEP_READY
+        startup_player_page = 0
+        startup_new_player_text = ""
+        _set_page_flow_back_button_text("keyboard", "BACK", BUTTON_FILL_COLOR)
         show_page("main")
+        update_startup_ui()
+        update_status_line(force=True)
+        return
+
+    if button["role"] == "flow_back" and current_page_name == "scores":
+        reset_game_session_state(clear_word_list=True)
+        startup_step = STARTUP_STEP_READY
+        startup_player_page = 0
+        startup_new_player_text = ""
+        _set_page_flow_back_button_text("scores", "BACK", BUTTON_FILL_COLOR)
+        show_page("main")
+        update_startup_ui()
+        update_status_line(force=True)
+        return
+
+    if button["role"] == "flow_next" and current_page_name == "scores":
+        reset_game_session_state(clear_word_list=True)
+        startup_step = STARTUP_STEP_READY
+        startup_player_page = 0
+        startup_new_player_text = ""
+        _set_page_flow_back_button_text("scores", "BACK", BUTTON_FILL_COLOR)
+        show_page("main")
+        update_startup_ui()
+        update_status_line(force=True)
         return
 
     if button["role"] == "flow_next" and current_page_name == "keyboard":
@@ -2002,7 +2171,7 @@ def handle_button_press(button):
             handle_skip_word()
         else:
             cycle_keyboard_panel_image()
-        if current_mode == MODE_AUDIO and not game_active:
+        if current_page_name == "keyboard" and current_mode == MODE_AUDIO and not game_active:
             play_word_audio_for_current_image()
         return
 
@@ -2013,6 +2182,7 @@ def handle_button_press(button):
 
     if button["role"] == "show_answer" and current_page_name == "keyboard":
         clear_answer_text()
+        mark_hint_for_current_word()
         show_correct_answer_hint()
         return
 
@@ -2031,11 +2201,13 @@ def handle_button_press(button):
         if expected_answer and typed_answer == expected_answer:
             print("Correct: {}".format(typed_answer))
             if game_active:
-                game_correct += 1
+                game_correct_total += 1
+                if not game_current_word_hint_used:
+                    game_correct += 1
             play_result_feedback(True)
             clear_last_answer_label()
             cycle_keyboard_panel_image()
-            if current_mode == MODE_AUDIO and not game_active:
+            if current_page_name == "keyboard" and current_mode == MODE_AUDIO and not game_active:
                 play_word_audio_for_current_image()
         else:
             print("Incorrect: '{}' expected '{}'".format(typed_answer, expected_answer))
