@@ -1,0 +1,26 @@
+{
+  "categories": {
+    "animals": ["cat", "dog", "elephant"],
+    "colors": ["red", "blue", "brown"],
+    "adjectives": ["brown", "happy", "sad"],
+    "numbers": ["one", "two", "three"],
+    "homophones": ["flower", "flour", "sea", "see"]
+  },
+  "words": {
+    "cat": {
+      "categories": ["animals"],
+      "audio": "/sd/wavs/cat.wav",
+      "picture": "/sd/imgs/cat.bmp"
+    },
+    "brown": {
+      "categories": ["colors", "adjectives"],
+      "audio": "/sd/wavs/brown.wav",
+      "picture": "/sd/imgs/brown.bmp"
+    },
+    "red": {
+      "categories": ["colors"],
+      "audio": "/sd/wavs/red.wav",
+      "picture": "/sd/imgs/red.bmp"
+    }
+  }
+}

@@ -18,12 +18,63 @@ import adafruit_imageload
 import adafruit_ds3231
 import circuitpython_st7796s
 import xpt2046_circuitpython
+import neopixel
 from adafruit_bitmap_font import bitmap_font
 from adafruit_display_text import label
 from adafruit_displayio_layout.layouts.page_layout import PageLayout
 from xpt2046_circuitpython.exceptions import ReadFailedException
 from adafruit_ili9341 import ILI9341
 from xpt2046_circuitpython import XPT2046
+
+
+bnp = neopixel.NeoPixel(board.NEOPIXEL, 1, brightness=0.2)
+bnp.fill((0, 0, 255))
+np = neopixel.NeoPixel(board.D13, 3, brightness=0.2, pixel_order=neopixel.RGB)
+np.fill((0, 255, 0))
+STARTUP_PROGRESS_ON = (40, 30, 0)
+STARTUP_PROGRESS_OFF = (0, 0, 0)
+startup_progress_step = 0
+NP_READY_BLUE = (0, 0, 40)
+NP_CORRECT_GREEN = (0, 40, 0)
+NP_INCORRECT_RED = (40, 0, 0)
+NP_SKIP_YELLOW = (40, 30, 0)
+NP_HINT_CYAN = (0, 30, 40)
+NP_OFF = (0, 0, 0)
+
+
+def tick_startup_progress_leds():
+    global startup_progress_step
+
+    try:
+        for pixel_index in range(len(np)):
+            if pixel_index == startup_progress_step:
+                np[pixel_index] = STARTUP_PROGRESS_ON
+            else:
+                np[pixel_index] = STARTUP_PROGRESS_OFF
+        startup_progress_step = (startup_progress_step + 1) % len(np)
+    except Exception:
+        pass
+
+
+def set_gameplay_np_color(color):
+    try:
+        np.fill(color)
+    except Exception:
+        pass
+
+
+def set_startup_progress_complete():
+    try:
+        np.fill((0, 40, 0))
+    except Exception:
+        pass
+
+
+def set_startup_progress_idle():
+    try:
+        np.fill(NP_OFF)
+    except Exception:
+        pass
 
 # Display SPI pins (updated for this hardware revision).
 TFT_CS = board.D11
@@ -139,11 +190,13 @@ keyboard_image_tile = None
 keyboard_image_bitmap = None
 keyboard_image_file = None
 keyboard_image_paths = []
+keyboard_image_paths_by_length = {"3": [], "4": [], "5": [], "6+": []}
 audio_mode_bitmap_cache = None
 audio_mode_palette_cache = None
 audio_mode_image_path_cache = None
 audio_word_index = 0
 audio_word_paths = []
+audio_word_paths_by_length = {"3": [], "4": [], "5": [], "6+": []}
 current_mode = MODE_PICTURE
 keyboard_mode_label = None
 TEST_FILE_PATH = "/sd/test.txt"
@@ -172,7 +225,7 @@ STARTUP_STEP_READY = "ready"
 STARTUP_STEP_PLAYER = "player"
 STARTUP_STEP_NAME_ENTRY = "name_entry"
 STARTUP_STEP_MODE = "mode"
-STARTUP_STEP_PROMPT_TYPE = "prompt_type"
+STARTUP_STEP_WORD_LENGTH = "word_length"
 STARTUP_STEP_WORD_COUNT = "word_count"
 
 startup_step = STARTUP_STEP_READY
@@ -182,9 +235,10 @@ startup_name_entry_page = 0
 startup_new_player_text = ""
 startup_selected_player = ""
 startup_selected_mode = MODE_PICTURE
-startup_selected_prompt_type = "random"
+startup_selected_word_length = "3"
 startup_selected_word_count = 10
 MAX_PLAYER_NAME_LEN = 12
+WORD_LENGTH_BUCKETS = ("3", "4", "5", "6+")
 
 NAME_ENTRY_COLS = 4
 NAME_ENTRY_ROWS = 4
@@ -429,8 +483,7 @@ def _clear_start_option(slot_index):
 def _startup_summary_text():
     player_text = startup_selected_player if startup_selected_player else "-"
     mode_text = "PIC" if startup_selected_mode == MODE_PICTURE else "AUD"
-    prompt_text = "RAND" if startup_selected_prompt_type == "random" else "CAT"
-    return "{} | {} | {} | {}".format(player_text, mode_text, prompt_text, startup_selected_word_count)
+    return "{} | {} | LEN {} | {}".format(player_text, mode_text, startup_selected_word_length, startup_selected_word_count)
 
 
 def update_startup_ui():
@@ -475,12 +528,12 @@ def update_startup_ui():
         _clear_start_option(3)
         return
 
-    if startup_step == STARTUP_STEP_PROMPT_TYPE:
-        startup_prompt_label.text = "Random or Category"
-        _set_start_option(0, "Random", {"kind": "prompt_type", "value": "random"}, MATH_GAME_GREEN)
-        _set_start_option(1, "Category", {"kind": "prompt_type", "value": "category"}, MATH_GAME_GOLD)
-        _clear_start_option(2)
-        _clear_start_option(3)
+    if startup_step == STARTUP_STEP_WORD_LENGTH:
+        startup_prompt_label.text = "Select Word Length"
+        _set_start_option(0, "3", {"kind": "word_length", "value": "3"}, MATH_GAME_BLUE)
+        _set_start_option(1, "4", {"kind": "word_length", "value": "4"}, MATH_GAME_ORANGE)
+        _set_start_option(2, "5", {"kind": "word_length", "value": "5"}, MATH_GAME_GREEN)
+        _set_start_option(3, "6+", {"kind": "word_length", "value": "6+"}, MATH_GAME_GOLD)
         return
 
     if startup_step == STARTUP_STEP_WORD_COUNT:
@@ -509,8 +562,8 @@ def _goto_next_startup_step():
     if startup_step == STARTUP_STEP_PLAYER:
         startup_step = STARTUP_STEP_MODE
     elif startup_step == STARTUP_STEP_MODE:
-        startup_step = STARTUP_STEP_PROMPT_TYPE
-    elif startup_step == STARTUP_STEP_PROMPT_TYPE:
+        startup_step = STARTUP_STEP_WORD_LENGTH
+    elif startup_step == STARTUP_STEP_WORD_LENGTH:
         startup_step = STARTUP_STEP_WORD_COUNT
 
     update_startup_ui()
@@ -520,8 +573,8 @@ def _goto_previous_startup_step():
     global startup_step
 
     if startup_step == STARTUP_STEP_WORD_COUNT:
-        startup_step = STARTUP_STEP_PROMPT_TYPE
-    elif startup_step == STARTUP_STEP_PROMPT_TYPE:
+        startup_step = STARTUP_STEP_WORD_LENGTH
+    elif startup_step == STARTUP_STEP_WORD_LENGTH:
         startup_step = STARTUP_STEP_MODE
     elif startup_step == STARTUP_STEP_MODE:
         startup_step = STARTUP_STEP_PLAYER
@@ -568,15 +621,28 @@ def finalize_startup_flow():
     print("[DEBUG] Entered finalize_startup_flow")  # Confirm function entry
     global game_word_list, game_word_index, game_total, game_correct, game_correct_total, game_skipped, game_active
     global game_hints_used, game_current_word_hint_used, game_hint_word_index
+    global startup_step
     set_game_mode(startup_selected_mode)
     # Select the correct asset list
     if startup_selected_mode == MODE_PICTURE:
+        length_map = keyboard_image_paths_by_length
         asset_list = keyboard_image_paths[:]
     else:
+        length_map = audio_word_paths_by_length
         asset_list = audio_word_paths[:]
+
+    selected_bucket = length_map.get(startup_selected_word_length, [])
+    asset_list = selected_bucket[:]
+
     print("[DEBUG] Asset list prepared, selecting words...")  # Confirm asset list setup
     # Randomly select X unique words
     word_count = min(startup_selected_word_count, len(asset_list))
+    if word_count <= 0:
+        print("No words available for selected length '{}' in mode '{}'".format(startup_selected_word_length, startup_selected_mode))
+        startup_step = STARTUP_STEP_WORD_LENGTH
+        update_startup_ui()
+        return
+
     game_word_list = _select_random_unique_items(asset_list, word_count)
     print("[DEBUG] Selected word list:")
     for i, w in enumerate(game_word_list):
@@ -591,10 +657,10 @@ def finalize_startup_flow():
     game_hint_word_index = -1
     game_active = True
     print(
-        "Start game: player='{}' mode='{}' prompt='{}' words={}".format(
+        "Start game: player='{}' mode='{}' length='{}' words={}".format(
             startup_selected_player,
             startup_selected_mode,
-            startup_selected_prompt_type,
+            startup_selected_word_length,
             startup_selected_word_count,
         )
     )
@@ -657,11 +723,13 @@ def show_current_game_word():
     clear_answer_text()
     refresh_answer_display()
     update_status_line(force=True)
+    set_gameplay_np_color(NP_READY_BLUE)
 
 
 def handle_skip_word():
     global game_skipped, game_word_index, game_active
     if game_active:
+        set_gameplay_np_color(NP_SKIP_YELLOW)
         game_skipped += 1
         advance_to_next_word()
         update_status_line(force=True)
@@ -682,7 +750,7 @@ def advance_to_next_word():
 
 
 def handle_startup_option(slot_index):
-    global startup_selected_player, startup_selected_mode, startup_selected_prompt_type
+    global startup_selected_player, startup_selected_mode, startup_selected_word_length
     global startup_selected_word_count, startup_player_page
     global startup_step, startup_name_entry_page, startup_new_player_text
 
@@ -719,8 +787,8 @@ def handle_startup_option(slot_index):
         _goto_next_startup_step()
         return
 
-    if action_kind == "prompt_type":
-        startup_selected_prompt_type = action_value
+    if action_kind == "word_length":
+        startup_selected_word_length = action_value
         _goto_next_startup_step()
         return
 
@@ -1127,8 +1195,27 @@ def update_keyboard_mode_label():
     clear_last_answer_label()
 
 
+def _answer_from_asset_path(asset_path):
+    file_name = asset_path.split("/")[-1]
+    dot_index = file_name.rfind(".")
+    if dot_index > 0:
+        return file_name[:dot_index].lower()
+    return file_name.lower()
+
+
+def _length_bucket_for_answer(answer_text):
+    answer_length = len(answer_text)
+    if answer_length <= 3:
+        return "3"
+    if answer_length == 4:
+        return "4"
+    if answer_length == 5:
+        return "5"
+    return "6+"
+
+
 def load_keyboard_image_paths(folder_path="/img"):
-    global keyboard_image_paths, keyboard_image_index
+    global keyboard_image_paths, keyboard_image_index, keyboard_image_paths_by_length
 
     try:
         names = os.listdir(folder_path)
@@ -1146,6 +1233,11 @@ def load_keyboard_image_paths(folder_path="/img"):
 
     bmp_names.sort()
     keyboard_image_paths = ["{}/{}".format(folder_path, name) for name in bmp_names]
+    keyboard_image_paths_by_length = {"3": [], "4": [], "5": [], "6+": []}
+    for image_path in keyboard_image_paths:
+        answer_text = _answer_from_asset_path(image_path)
+        length_bucket = _length_bucket_for_answer(answer_text)
+        keyboard_image_paths_by_length[length_bucket].append(image_path)
     keyboard_image_index = 0
 
     if not keyboard_image_paths:
@@ -1153,13 +1245,23 @@ def load_keyboard_image_paths(folder_path="/img"):
         return False
 
     print("Loaded {} keyboard images from {}".format(len(keyboard_image_paths), folder_path))
-    for image_path in keyboard_image_paths:
+    for index, image_path in enumerate(keyboard_image_paths):
         print("  {}".format(image_path))
+        if ((index + 1) % 25) == 0:
+            tick_startup_progress_leds()
+    print(
+        "Image length buckets 3:{} 4:{} 5:{} 6+:{}".format(
+            len(keyboard_image_paths_by_length["3"]),
+            len(keyboard_image_paths_by_length["4"]),
+            len(keyboard_image_paths_by_length["5"]),
+            len(keyboard_image_paths_by_length["6+"]),
+        )
+    )
     return True
 
 
 def load_audio_word_paths(folder_path=AUDIO_WORDS_DIR):
-    global audio_word_paths, audio_word_index
+    global audio_word_paths, audio_word_index, audio_word_paths_by_length
 
     try:
         names = os.listdir(folder_path)
@@ -1176,6 +1278,11 @@ def load_audio_word_paths(folder_path=AUDIO_WORDS_DIR):
 
     wav_names.sort()
     audio_word_paths = ["{}/{}".format(folder_path, name) for name in wav_names]
+    audio_word_paths_by_length = {"3": [], "4": [], "5": [], "6+": []}
+    for wav_path in audio_word_paths:
+        answer_text = _answer_from_asset_path(wav_path)
+        length_bucket = _length_bucket_for_answer(answer_text)
+        audio_word_paths_by_length[length_bucket].append(wav_path)
     audio_word_index = 0
 
     if not audio_word_paths:
@@ -1183,8 +1290,18 @@ def load_audio_word_paths(folder_path=AUDIO_WORDS_DIR):
         return False
 
     print("Loaded {} audio prompts from {}".format(len(audio_word_paths), folder_path))
-    for wav_path in audio_word_paths:
+    for index, wav_path in enumerate(audio_word_paths):
         print("  {}".format(wav_path))
+        if ((index + 1) % 25) == 0:
+            tick_startup_progress_leds()
+    print(
+        "Audio length buckets 3:{} 4:{} 5:{} 6+:{}".format(
+            len(audio_word_paths_by_length["3"]),
+            len(audio_word_paths_by_length["4"]),
+            len(audio_word_paths_by_length["5"]),
+            len(audio_word_paths_by_length["6+"]),
+        )
+    )
     return True
 
 
@@ -2135,6 +2252,7 @@ def handle_button_press(button):
     if button["role"] == "flow_back" and current_page_name == "keyboard":
         reset_game_session_state()
         stop_audio_session()
+        set_gameplay_np_color(NP_OFF)
         startup_step = STARTUP_STEP_READY
         startup_player_page = 0
         startup_new_player_text = ""
@@ -2146,6 +2264,7 @@ def handle_button_press(button):
 
     if button["role"] == "flow_back" and current_page_name == "scores":
         reset_game_session_state(clear_word_list=True)
+        set_gameplay_np_color(NP_OFF)
         startup_step = STARTUP_STEP_READY
         startup_player_page = 0
         startup_new_player_text = ""
@@ -2157,6 +2276,7 @@ def handle_button_press(button):
 
     if button["role"] == "flow_next" and current_page_name == "scores":
         reset_game_session_state(clear_word_list=True)
+        set_gameplay_np_color(NP_OFF)
         startup_step = STARTUP_STEP_READY
         startup_player_page = 0
         startup_new_player_text = ""
@@ -2184,6 +2304,8 @@ def handle_button_press(button):
         clear_answer_text()
         mark_hint_for_current_word()
         show_correct_answer_hint()
+        if game_active:
+            set_gameplay_np_color(NP_HINT_CYAN)
         return
 
     if current_page_name != "keyboard":
@@ -2204,6 +2326,7 @@ def handle_button_press(button):
                 game_correct_total += 1
                 if not game_current_word_hint_used:
                     game_correct += 1
+                set_gameplay_np_color(NP_CORRECT_GREEN)
             play_result_feedback(True)
             clear_last_answer_label()
             cycle_keyboard_panel_image()
@@ -2212,6 +2335,8 @@ def handle_button_press(button):
         else:
             print("Incorrect: '{}' expected '{}'".format(typed_answer, expected_answer))
             show_wrong_answer_label(answer_display_text)
+            if game_active:
+                set_gameplay_np_color(NP_INCORRECT_RED)
             play_result_feedback(False)
             clear_answer_text()
             if game_active:
@@ -2229,56 +2354,79 @@ def handle_button_press(button):
 
 def main():
     global pages
+    tick_startup_progress_leds()
     displayio.release_displays()
     print("Displays released.")
+    tick_startup_progress_leds()
     backlight = digitalio.DigitalInOut(TFT_BACKLIGHT)
     backlight.direction = digitalio.Direction.OUTPUT
     # Keep panel dark until the first frame is fully initialized.
-    backlight.value = False
-    print("Backlight pin initialized, backlight off.")
+    backlight.value = True
+    print("Backlight pin initialized, backlight on.")
+    tick_startup_progress_leds()
     prepare_spi_chip_selects()
     print("SPI chip select pins initialized.")
-    #time.sleep(.05)  # Let CS lines settle before bringing up SPI bus.
+    time.sleep(.05)  # Let CS lines settle before bringing up SPI bus.
     spi = board.SPI()
-    #time.sleep(.05)  # Let SPI bus stabilize before first device access.
+    time.sleep(.05)  # Let SPI bus stabilize before first device access.
     init_sd_card(spi)
     print("SD card initialized and mounted.")
+    tick_startup_progress_leds()
     time.sleep(.05)   # Allow SD card bus activity to clear before display init.
     display = init_display(spi)
     print("Display initialized: {}x{} @ {} baud".format(DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_SPI_BAUDRATE))
+    tick_startup_progress_leds()
     time.sleep(.05)   # Allow display to finish init before touch controller setup.
     _touch = init_touch(spi)
     print("Touch controller initialized: {}x{} mapped to {}x{}".format(_touch.width, _touch.height, DISPLAY_WIDTH, DISPLAY_HEIGHT))
+    tick_startup_progress_leds()
     time.sleep(.05)  # Let touch controller settle.
     load_fonts()
     print("Fonts loaded: {}".format(", ".join(FONTS.keys())))
+    tick_startup_progress_leds()
     init_real_time_clock()
     print("Real-time clock initialized.")
+    tick_startup_progress_leds()
     load_keyboard_image_paths("/sd/imgs")
+    tick_startup_progress_leds()
     load_audio_word_paths(AUDIO_WORDS_DIR)
     print("Media file paths loaded: {} images, {} audio prompts".format(len(keyboard_image_paths), len(audio_word_paths)))
+    tick_startup_progress_leds()
     if ENABLE_WAV_FORMAT_CHECK:
         validate_audio_prompt_formats()
-
+    time.sleep(.05)
+    tick_startup_progress_leds()
     pages = PageLayout(x=0, y=0)
     pages.add_content(build_main_page(), page_name="main")
+    time.sleep(.05)
+    tick_startup_progress_leds()
     pages.add_content(build_name_entry_page(), page_name="name_entry")
+    time.sleep(.05)
+    tick_startup_progress_leds()
     pages.add_content(build_keyboard_page(), page_name="keyboard")
     pages.add_content(build_scores_page(), page_name="scores")
+    tick_startup_progress_leds()
     load_player_names()
+    time.sleep(.05)
+    tick_startup_progress_leds()
     update_startup_ui()
     set_game_mode(MODE_PICTURE)
     show_page("main")
     update_status_line(force=True)
+    tick_startup_progress_leds()
 
     display.root_group = pages
     time.sleep(.05)
     backlight.value = True
+    set_startup_progress_complete()
+    time.sleep(.05)  # Let the first frame render with backlight on before playing audio.
+    tick_startup_progress_leds()
     if init_audio_output():
         play_startup_wav()
         shutdown_audio_output()
     print("UI scaffold ready: main, keyboard, and scores pages.")
-
+    set_startup_progress_idle()
+    np.fill((64, 32, 100))
     touch_held = False
     while True:
         try:
