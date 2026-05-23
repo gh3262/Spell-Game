@@ -105,7 +105,7 @@ AUDIO_STARTUP_WAVS = (
     "/sd/wavs/_start_letshavefun.wav",
 )
 AUDIO_WORDS_DIR = "/sd/wavs"
-AUDIOMODE_IMAGE_CANDIDATES = ("/img/_audio.bmp", "/imgs/_audio.bmp")
+AUDIOMODE_IMAGE_CANDIDATES = ("/sd/img/_audio.bmp", "/sd/imgs/_audio.bmp")
 MODE_PICTURE = "picture"
 MODE_AUDIO = "audio"
 MUTE_TONES_IN_AUDIO_MODE = False
@@ -137,6 +137,7 @@ MATH_GAME_BLUE = 0x26547C
 MATH_GAME_ORANGE = 0xB85C00
 MATH_GAME_GREEN = 0x1A6B3A
 MATH_GAME_GOLD = 0xC9B000
+MATH_GAME_RED = 0xA00000
 
 FLOW_BUTTON_WIDTH = 64
 FLOW_BUTTON_HEIGHT = 40
@@ -203,6 +204,8 @@ TEST_FILE_PATH = "/sd/test.txt"
 PLAYERS_FILE_PATH = "/sd/players.txt"
 TPLAYERS_FILE_PATH = "/sd/tplayers.txt"
 SCORES_FILE_PATH = "/sd/scores.txt"
+IMAGE_SELECTION_LOG_PATH = "/sd/image.txt"
+AUDIO_SELECTION_LOG_PATH = "/sd/audio.txt"
 
 STATS_FILE_PATH = "/sd/stats.json"
 DEFAULT_STATS = {"total_games": 0, "total_correct": 0, "high_score": 0}
@@ -269,6 +272,8 @@ game_hints_used = 0
 game_current_word_hint_used = False
 game_hint_word_index = -1
 game_active = False
+game_wrong_no_hint_words = []
+game_skipped_words = []
 
 results_player_label = None
 results_total_label = None
@@ -367,12 +372,12 @@ def _has_player_name(candidate_name):
 def _set_name_entry_page(page_index):
     global startup_name_entry_page
 
-    if page_index < 0:
-        page_index = 0
-    last_index = len(NAME_ENTRY_DYNAMIC_PAGES) - 1
-    if page_index > last_index:
-        page_index = last_index
-    startup_name_entry_page = page_index
+    page_count = len(NAME_ENTRY_DYNAMIC_PAGES)
+    if page_count <= 0:
+        startup_name_entry_page = 0
+        return
+
+    startup_name_entry_page = page_index % page_count
 
 
 def _append_to_new_player_name(char_text):
@@ -603,6 +608,7 @@ def _select_random_unique_items(items, count):
 def reset_game_session_state(clear_word_list=False):
     global game_word_list, game_word_index, game_total, game_correct, game_correct_total
     global game_skipped, game_hints_used, game_current_word_hint_used, game_hint_word_index, game_active
+    global game_wrong_no_hint_words, game_skipped_words
 
     if clear_word_list:
         game_word_list = []
@@ -615,12 +621,15 @@ def reset_game_session_state(clear_word_list=False):
     game_current_word_hint_used = False
     game_hint_word_index = -1
     game_active = False
+    game_wrong_no_hint_words = []
+    game_skipped_words = []
 
 
 def finalize_startup_flow():
     print("[DEBUG] Entered finalize_startup_flow")  # Confirm function entry
     global game_word_list, game_word_index, game_total, game_correct, game_correct_total, game_skipped, game_active
     global game_hints_used, game_current_word_hint_used, game_hint_word_index
+    global game_wrong_no_hint_words, game_skipped_words
     global startup_step
     set_game_mode(startup_selected_mode)
     # Select the correct asset list
@@ -644,6 +653,7 @@ def finalize_startup_flow():
         return
 
     game_word_list = _select_random_unique_items(asset_list, word_count)
+    append_selected_words_debug_log(startup_selected_mode, game_word_list)
     print("[DEBUG] Selected word list:")
     for i, w in enumerate(game_word_list):
         print("  {}: {}".format(i+1, w))
@@ -656,6 +666,8 @@ def finalize_startup_flow():
     game_current_word_hint_used = False
     game_hint_word_index = -1
     game_active = True
+    game_wrong_no_hint_words = []
+    game_skipped_words = []
     print(
         "Start game: player='{}' mode='{}' length='{}' words={}".format(
             startup_selected_player,
@@ -729,6 +741,7 @@ def show_current_game_word():
 def handle_skip_word():
     global game_skipped, game_word_index, game_active
     if game_active:
+        _track_skipped_word(current_prompt_answer())
         set_gameplay_np_color(NP_SKIP_YELLOW)
         game_skipped += 1
         advance_to_next_word()
@@ -1447,6 +1460,144 @@ def current_prompt_answer():
     return current_image_answer()
 
 
+def _append_unique_word(word_list, word_text):
+    if not word_text:
+        return
+    if word_text in word_list:
+        return
+    word_list.append(word_text)
+
+
+def _track_wrong_no_hint_word(word_text):
+    _append_unique_word(game_wrong_no_hint_words, word_text)
+
+
+def _track_skipped_word(word_text):
+    _append_unique_word(game_skipped_words, word_text)
+
+
+def _combined_missed_words():
+    combined = []
+    for word_text in game_wrong_no_hint_words:
+        _append_unique_word(combined, word_text)
+    for word_text in game_skipped_words:
+        _append_unique_word(combined, word_text)
+    return combined
+
+
+def _current_timestamp_tag():
+    try:
+        now = system_rtc.datetime
+    except Exception:
+        now = time.localtime()
+    return "{:04d}{:02d}{:02d}_{:02d}{:02d}".format(
+        now.tm_year,
+        now.tm_mon,
+        now.tm_mday,
+        now.tm_hour,
+        now.tm_min,
+    )
+
+
+def _safe_player_file_token(name_text):
+    if not name_text:
+        return "PLAYER"
+
+    def _is_ascii_alnum(ch):
+        code = ord(ch)
+        return (48 <= code <= 57) or (65 <= code <= 90) or (97 <= code <= 122)
+
+    cleaned_chars = []
+    for ch in name_text:
+        if _is_ascii_alnum(ch):
+            cleaned_chars.append(ch)
+        elif ch in (" ", "-", "_"):
+            cleaned_chars.append("_")
+
+    cleaned = "".join(cleaned_chars).strip("_")
+    if not cleaned:
+        cleaned = "PLAYER"
+    return cleaned.upper()
+
+
+def append_selected_words_debug_log(mode_name, selected_assets):
+    if mode_name == MODE_AUDIO:
+        log_path = AUDIO_SELECTION_LOG_PATH
+    else:
+        log_path = IMAGE_SELECTION_LOG_PATH
+
+    selected_words = []
+    for asset_path in selected_assets:
+        selected_words.append(_answer_from_asset_path(asset_path))
+
+    line_text = ",".join(selected_words)
+
+    try:
+        with open(log_path, "a") as log_file:
+            log_file.write(line_text + "\n")
+        print("Selection log appended: {} -> {}".format(log_path, line_text))
+    except Exception as exc:
+        print("Selection log append failed for {}: {}".format(log_path, exc))
+
+
+def append_game_score_records():
+    timestamp_text = _current_timestamp_tag()
+    mode_text = "audio" if startup_selected_mode == MODE_AUDIO else "picture"
+    selected_count = startup_selected_word_count
+
+    attempted = game_total - game_skipped
+    if attempted < 0:
+        attempted = 0
+
+    correct_no_hint = game_correct
+    correct_with_hint = game_correct_total - game_correct
+    if correct_with_hint < 0:
+        correct_with_hint = 0
+
+    player_text = startup_selected_player if startup_selected_player else "PLAYER"
+    shared_line = "{},{},{},{},{},{},{}".format(
+        player_text,
+        timestamp_text,
+        mode_text,
+        selected_count,
+        attempted,
+        correct_no_hint,
+        correct_with_hint,
+    )
+
+    try:
+        with open(SCORES_FILE_PATH, "a") as scores_file:
+            scores_file.write(shared_line + "\n")
+        print("Score appended: {}".format(shared_line))
+    except Exception as exc:
+        print("Score append failed for {}: {}".format(SCORES_FILE_PATH, exc))
+
+    missed_words = _combined_missed_words()
+    if missed_words:
+        missed_text = "|".join(missed_words)
+    else:
+        missed_text = "-"
+
+    player_file_path = "/sd/{}_scores.txt".format(_safe_player_file_token(player_text))
+    player_line = "{},{},{},{},{},{},{},{}".format(
+        timestamp_text,
+        mode_text,
+        selected_count,
+        attempted,
+        correct_no_hint,
+        correct_with_hint,
+        len(missed_words),
+        missed_text,
+    )
+
+    try:
+        with open(player_file_path, "a") as player_scores_file:
+            player_scores_file.write(player_line + "\n")
+        print("Player score appended: {} -> {}".format(player_file_path, player_line))
+    except Exception as exc:
+        print("Player score append failed for {}: {}".format(player_file_path, exc))
+
+
 def clear_keyboard_panel_image():
     global keyboard_image_tile, keyboard_image_bitmap, keyboard_image_file
 
@@ -1892,8 +2043,8 @@ def build_name_entry_page():
 
     fixed_rows = (
         ("PREV", "name_entry_prev", "ne_prev", MATH_GAME_ORANGE),
-        ("NEXT", "name_entry_next", "ne_next", MATH_GAME_GREEN),
-        ("BKSP", "name_entry_bksp", "ne_bksp", MATH_GAME_ORANGE),
+        ("NEXT", "name_entry_next", "ne_next", MATH_GAME_ORANGE),
+        ("BKSP", "name_entry_bksp", "ne_bksp", MATH_GAME_RED),
         ("DONE", "name_entry_done", "ne_done", MATH_GAME_GREEN),
         ("A", "name_entry_a", "ne_char", MATH_GAME_GOLD),
         ("E", "name_entry_e", "ne_char", MATH_GAME_GOLD),
@@ -1995,6 +2146,8 @@ def build_scores_page():
 
 
 def show_results_page():
+    append_game_score_records()
+
     attempted = game_total - game_skipped
     if attempted < 0:
         attempted = 0
@@ -2337,6 +2490,8 @@ def handle_button_press(button):
             show_wrong_answer_label(answer_display_text)
             if game_active:
                 set_gameplay_np_color(NP_INCORRECT_RED)
+                if not game_current_word_hint_used:
+                    _track_wrong_no_hint_word(expected_answer)
             play_result_feedback(False)
             clear_answer_text()
             if game_active:
