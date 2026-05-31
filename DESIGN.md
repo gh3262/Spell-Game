@@ -10,8 +10,10 @@ Active runtime asset locations on SD card:
 
 Runtime data files on SD card root:
 - `/sd/players.txt` (current active player list)
-- `/sd/tplayers.txt` (template player list used when resetting)
 - `/sd/scores.txt` (saved score data)
+
+Runtime template file on board root:
+- `/tplayers.txt` (template player list used to heal missing/empty `/sd/players.txt`)
 
 Repository sample data files:
 - Sample copies are kept in the repo `files/` folder: `files/players.txt`, `files/tplayers.txt`, and `files/scores.txt`.
@@ -59,6 +61,14 @@ Repository sample data files:
 - Fixed Audio mode replay issue where the last word would replay after the game ended.
 - Improved hint/wrong-answer label handling to clear stale text when advancing prompts.
 
+## Session Updates (2026-05-31)
+- Keyboard image panel now uses the active gameplay word image during rounds (`game_word_list[game_word_index]`) instead of static preview indexing.
+- Main startup page now renders a dark 120x120 panel and attempts to load `_sbee.bmp` with fallback path handling.
+- Startup title vertical position was moved lower to accommodate startup image placement.
+- Player-file recovery now restores `/sd/players.txt` from board-root `/tplayers.txt` when players data is missing/empty.
+- Recovery now includes a template-read guard so missing `/tplayers.txt` does not trigger unnecessary restore-write errors.
+- Branching workflow note: features can be iterated on one hardware platform first and back-ported after validation.
+
 ## Deployment Checklist
 1. Save and deploy updated `code.py` to board root.
 2. Verify `lib/` contains required runtime modules used by current code paths:
@@ -72,20 +82,21 @@ Repository sample data files:
     - supporting CircuitPython core modules (`fourwire`, etc.)
 3. Verify SD mount prerequisites:
     - `/sd/players.txt`
-    - `/sd/tplayers.txt`
     - `/sd/scores.txt`
     - `/sd/imgs/*.bmp`
     - `/sd/wavs/*.wav`
-4. Boot validation:
+4. Verify board-root template file exists:
+    - `/tplayers.txt`
+5. Boot validation:
     - RTC init logs expected state
     - SD mounts without retries/failures
     - Display init completes without CS pin conflicts
     - UI scaffold initializes (`main`, `keyboard`, `scores`)
     - One reserved startup WAV plays
-5. Gameplay validation:
+6. Gameplay validation:
     - Picture mode uses randomized round list and stops at selected word count
     - Audio mode plays one prompt per word (no duplicate play), advances correctly, and respects round limit
-6. Before push:
+7. Before push:
     - Remove or reduce temporary debug prints not needed for field diagnostics
     - Confirm README/DESIGN notes reflect current behavior
 
@@ -191,7 +202,7 @@ Repository sample data files:
 - Prompt assets are expected on the SD card at `/sd/imgs` and `/sd/wavs`
 - Images should be 120x120 .bmp files
 - Audio prompt files should be `.wav`; underscore-prefixed WAVs are treated as reserved system assets and excluded from gameplay prompt rotation
-- Reserved audio-mode speaker image is currently loaded from internal storage candidates: `/img/_audio.bmp` then `/imgs/_audio.bmp`
+- Reserved audio-mode speaker image is currently loaded from SD candidates: `/sd/img/_audio.bmp` then `/sd/imgs/_audio.bmp`
 - Problem banks (audio, images, choices)
 - Fonts
 - Audio files (wav currently active, mp3 planned later)
@@ -200,10 +211,12 @@ Repository sample data files:
 ```text
 /sd/
     players.txt      # active player list used by runtime
-    tplayers.txt     # template player list restored on reset
     scores.txt       # saved scores
     imgs/            # picture prompts (*.bmp)
     wavs/            # audio prompts (*.wav)
+
+/
+    tplayers.txt     # template player list for healing /sd/players.txt
 ```
 
 Repo-side sample files for SD root data:

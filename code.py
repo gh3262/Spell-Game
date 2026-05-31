@@ -63,6 +63,24 @@ def set_gameplay_np_color(color):
         pass
 
 
+def set_gameplay_wrong_attempt_leds(wrong_attempts):
+    try:
+        led_colors = [NP_READY_BLUE, NP_READY_BLUE, NP_READY_BLUE]
+        for led_index in range(min(wrong_attempts, len(led_colors))):
+            led_colors[led_index] = NP_INCORRECT_RED
+        for led_index, led_color in enumerate(led_colors):
+            np[led_index] = led_color
+    except Exception:
+        pass
+
+
+def _gameplay_memory_text():
+    try:
+        return "mem_free={}".format(gc.mem_free())
+    except Exception:
+        return "mem_free=?"
+
+
 def set_startup_progress_complete():
     try:
         np.fill((0, 40, 0))
@@ -107,7 +125,8 @@ AUDIO_STARTUP_WAVS = (
 AUDIO_WORDS_DIR = "/sd/wavs"
 AUDIOMODE_IMAGE_CANDIDATES = ("/sd/img/_audio.bmp", "/sd/imgs/_audio.bmp")
 MODE_PICTURE = "picture"
-MODE_AUDIO = "audio"
+MODE_SOUND = "sound"
+MODE_AUDIO = MODE_SOUND
 MUTE_TONES_IN_AUDIO_MODE = False
 ENABLE_WAV_FORMAT_CHECK = False
 WAV_TARGET_SAMPLE_RATES = (16000, 22050)
@@ -145,7 +164,7 @@ FLOW_BUTTON_MARGIN = 8
 
 STATUS_LINE_Y = DISPLAY_HEIGHT - 12
 
-START_ACTIONS_TOP_Y = 360
+START_ACTIONS_TOP_Y = 340
 START_ACTION_BUTTON_WIDTH = 144
 START_ACTION_BUTTON_HEIGHT = 42
 START_ACTION_BUTTON_GAP_X = 12
@@ -173,7 +192,7 @@ FONT_PATHS = {
     "button": "/fonts/Calibri-21.pcf",
     "small_button": "/fonts/ComicSansMS-15.pcf",
     "title": "/fonts/EffectsEighty-32.pcf",
-    "score": "/fonts/Calibri-17.pcf",
+    "score": "/fonts/Calibri-21.pcf", #17
 }
 FONTS = {}
 BUTTON_REGISTRY = []
@@ -200,12 +219,14 @@ audio_word_paths = []
 audio_word_paths_by_length = {"3": [], "4": [], "5": [], "6+": []}
 current_mode = MODE_PICTURE
 keyboard_mode_label = None
+keyboard_answer_button = None
 TEST_FILE_PATH = "/sd/test.txt"
 PLAYERS_FILE_PATH = "/sd/players.txt"
-TPLAYERS_FILE_PATH = "/sd/tplayers.txt"
+TPLAYERS_FILE_PATH = "/tplayers.txt"
 SCORES_FILE_PATH = "/sd/scores.txt"
 IMAGE_SELECTION_LOG_PATH = "/sd/image.txt"
 AUDIO_SELECTION_LOG_PATH = "/sd/audio.txt"
+ENABLE_SELECTION_DEBUG_LOG = False
 
 STATS_FILE_PATH = "/sd/stats.json"
 DEFAULT_STATS = {"total_games": 0, "total_correct": 0, "high_score": 0}
@@ -216,6 +237,7 @@ audio_session_active = False
 system_rtc = rtc.RTC()
 external_rtc = None
 last_status_second = None
+sd_write_faulted = False
 
 startup_title_label = None
 startup_prompt_label = None
@@ -271,6 +293,7 @@ game_skipped = 0
 game_hints_used = 0
 game_current_word_hint_used = False
 game_hint_word_index = -1
+game_current_word_wrong_attempts = 0
 game_active = False
 game_wrong_no_hint_words = []
 game_skipped_words = []
@@ -289,6 +312,34 @@ def _normalize_player_name(name_text):
 
 def load_player_names(file_path=PLAYERS_FILE_PATH):
     global startup_player_names
+
+    # If players.txt is missing or empty, restore from the root template file.
+    file_exists_and_valid = False
+    try:
+        with open(file_path, "r") as players_file:
+            for line in players_file:
+                if _normalize_player_name(line):
+                    file_exists_and_valid = True
+                    break
+    except Exception:
+        pass
+
+    if not file_exists_and_valid:
+        template_content = None
+        try:
+            with open(TPLAYERS_FILE_PATH, "r") as template_file:
+                template_content = template_file.read()
+        except Exception:
+            template_content = None
+
+        if template_content is not None:
+            print("players.txt is missing or empty. Restoring from template...")
+            try:
+                with open(file_path, "w") as players_file:
+                    players_file.write(template_content)
+                print("Successfully copied {} to {}".format(TPLAYERS_FILE_PATH, file_path))
+            except Exception as exc:
+                print("Failed to restore players.txt from {}: {}".format(TPLAYERS_FILE_PATH, exc))
 
     try:
         with open(file_path, "r") as players_file:
@@ -528,7 +579,7 @@ def update_startup_ui():
     if startup_step == STARTUP_STEP_MODE:
         startup_prompt_label.text = "Select Game Mode"
         _set_start_option(0, "Picture", {"kind": "mode", "value": MODE_PICTURE}, MATH_GAME_BLUE)
-        _set_start_option(1, "Audio", {"kind": "mode", "value": MODE_AUDIO}, MATH_GAME_ORANGE)
+        _set_start_option(1, "Sound", {"kind": "mode", "value": MODE_AUDIO}, MATH_GAME_ORANGE)
         _clear_start_option(2)
         _clear_start_option(3)
         return
@@ -543,10 +594,10 @@ def update_startup_ui():
 
     if startup_step == STARTUP_STEP_WORD_COUNT:
         startup_prompt_label.text = "How Many Words?"
-        _set_start_option(0, "10", {"kind": "word_count", "value": 10}, MATH_GAME_BLUE)
-        _set_start_option(1, "20", {"kind": "word_count", "value": 20}, MATH_GAME_ORANGE)
-        _set_start_option(2, "35", {"kind": "word_count", "value": 35}, MATH_GAME_GREEN)
-        _set_start_option(3, "50", {"kind": "word_count", "value": 50}, MATH_GAME_GOLD)
+        _set_start_option(0, "10", {"kind": "word_count", "value": 10}, MATH_GAME_ORANGE)
+        _set_start_option(1, "20", {"kind": "word_count", "value": 20}, MATH_GAME_BLUE)
+        _set_start_option(2, "35", {"kind": "word_count", "value": 35}, MATH_GAME_GOLD)
+        _set_start_option(3, "50", {"kind": "word_count", "value": 50}, MATH_GAME_GREEN)
         return
 
 
@@ -607,7 +658,7 @@ def _select_random_unique_items(items, count):
 
 def reset_game_session_state(clear_word_list=False):
     global game_word_list, game_word_index, game_total, game_correct, game_correct_total
-    global game_skipped, game_hints_used, game_current_word_hint_used, game_hint_word_index, game_active
+    global game_skipped, game_hints_used, game_current_word_hint_used, game_hint_word_index, game_current_word_wrong_attempts, game_active
     global game_wrong_no_hint_words, game_skipped_words
 
     if clear_word_list:
@@ -620,9 +671,11 @@ def reset_game_session_state(clear_word_list=False):
     game_hints_used = 0
     game_current_word_hint_used = False
     game_hint_word_index = -1
+    game_current_word_wrong_attempts = 0
     game_active = False
     game_wrong_no_hint_words = []
     game_skipped_words = []
+    _set_keyboard_answer_button_visible(False)
 
 
 def finalize_startup_flow():
@@ -676,7 +729,7 @@ def finalize_startup_flow():
             startup_selected_word_count,
         )
     )
-    print("[DEBUG] finalize_startup_flow completed")  # Confirm function exit
+    print("[DEBUG] finalize_startup_flow completed ({})".format(_gameplay_memory_text()))  # Confirm function exit
     if startup_selected_mode == MODE_AUDIO:
         start_audio_session()
     else:
@@ -689,23 +742,26 @@ def finalize_startup_flow():
 def show_current_game_word():
     """Update the UI to show the current word/image/audio."""
     global game_word_list, game_word_index, game_active, keyboard_image_bitmap, keyboard_image_tile
-    global game_current_word_hint_used, game_hint_word_index
-    print(f"[DEBUG] Showing current word. Index: {game_word_index}, Active: {game_active}")
+    global game_current_word_hint_used, game_hint_word_index, game_current_word_wrong_attempts
+    print("[DEBUG] Showing current word. Index: {}, Active: {} ({})".format(game_word_index, game_active, _gameplay_memory_text()))
     if not game_active or game_word_index >= len(game_word_list):
-        print("[DEBUG] No active game or index out of range.")
+        print("[DEBUG] No active game or index out of range. ({})".format(_gameplay_memory_text()))
         return
 
     if game_word_index != game_hint_word_index:
         game_current_word_hint_used = False
         game_hint_word_index = game_word_index
+    game_current_word_wrong_attempts = 0
 
     clear_last_answer_label()
+    _set_keyboard_answer_button_visible(False)
+    set_gameplay_wrong_attempt_leds(0)
 
     # Set the current asset index for answer checking and display
     if current_mode == MODE_PICTURE:
         # Load and display the image directly from the randomized list
         image_path = game_word_list[game_word_index]
-        print(f"[DEBUG] Displaying image: {image_path}")
+        print("[DEBUG] Displaying image: {} ({})".format(image_path, _gameplay_memory_text()))
         # Clear old image first
         clear_keyboard_panel_image()
         try:
@@ -718,13 +774,13 @@ def show_current_game_word():
                 y=IMAGE_PANEL_Y,
             )
             keyboard_page_group.append(keyboard_image_tile)
-            print(f"[DEBUG] Image loaded and displayed successfully")
+            print("[DEBUG] Image loaded and displayed successfully ({})".format(_gameplay_memory_text()))
         except Exception as exc:
             print("Failed to load image {}: {}".format(image_path, exc))
     else:
         # Play audio directly from the randomized list
         audio_path = game_word_list[game_word_index]
-        print(f"[DEBUG] Playing audio: {audio_path}")
+        print("[DEBUG] Playing audio: {} ({})".format(audio_path, _gameplay_memory_text()))
         try:
             global audio_word_index
             audio_word_index = audio_word_paths.index(audio_path)
@@ -750,10 +806,10 @@ def handle_skip_word():
 
 def advance_to_next_word():
     global game_word_index, game_active, game_total
-    print(f"[DEBUG] Advancing to next word. Current index: {game_word_index}, Total: {game_total}")
+    print("[DEBUG] Advancing to next word. Current index: {}, Total: {} ({})".format(game_word_index, game_total, _gameplay_memory_text()))
     game_word_index += 1
     if game_word_index >= game_total:
-        print("[DEBUG] Word limit reached. Ending game.")
+        print("[DEBUG] Word limit reached. Ending game. ({})".format(_gameplay_memory_text()))
         game_active = False
         stop_audio_session()
         update_status_line(force=True)
@@ -1171,7 +1227,33 @@ def clear_answer_text():
 def clear_last_answer_label():
     """Blank the last-wrong-answer label (call when a new image loads)."""
     if keyboard_mode_label is not None:
+        keyboard_mode_label.color = WRONG_ANSWER_COLOR
         keyboard_mode_label.text = ""
+
+
+def _set_keyboard_answer_button_visible(visible):
+    global keyboard_answer_button
+
+    if keyboard_answer_button is None:
+        return
+
+    keyboard_answer_button["visible"] = visible
+    keyboard_answer_button["active"] = visible
+    try:
+        keyboard_answer_button["tile"].hidden = not visible
+    except Exception:
+        pass
+    try:
+        keyboard_answer_button["label"].hidden = not visible
+    except Exception:
+        pass
+
+
+def reveal_answer_for_current_word():
+    _set_keyboard_answer_button_visible(True)
+    clear_answer_text()
+    mark_hint_for_current_word()
+    show_correct_answer_hint()
 
 
 def show_wrong_answer_label(typed_text):
@@ -1521,6 +1603,15 @@ def _safe_player_file_token(name_text):
 
 
 def append_selected_words_debug_log(mode_name, selected_assets):
+    global sd_write_faulted
+
+    if not ENABLE_SELECTION_DEBUG_LOG:
+        return
+
+    if sd_write_faulted:
+        print("Selection log skipped: SD write faulted")
+        return
+
     if mode_name == MODE_AUDIO:
         log_path = AUDIO_SELECTION_LOG_PATH
     else:
@@ -1537,12 +1628,19 @@ def append_selected_words_debug_log(mode_name, selected_assets):
             log_file.write(line_text + "\n")
         print("Selection log appended: {} -> {}".format(log_path, line_text))
     except Exception as exc:
+        sd_write_faulted = True
         print("Selection log append failed for {}: {}".format(log_path, exc))
 
 
 def append_game_score_records():
+    global sd_write_faulted
+
+    if sd_write_faulted:
+        print("Score writes skipped: SD write faulted")
+        return
+
     timestamp_text = _current_timestamp_tag()
-    mode_text = "audio" if startup_selected_mode == MODE_AUDIO else "picture"
+    mode_text = "sound" if startup_selected_mode == MODE_AUDIO else "picture"
     selected_count = startup_selected_word_count
 
     attempted = game_total - game_skipped
@@ -1570,7 +1668,9 @@ def append_game_score_records():
             scores_file.write(shared_line + "\n")
         print("Score appended: {}".format(shared_line))
     except Exception as exc:
+        sd_write_faulted = True
         print("Score append failed for {}: {}".format(SCORES_FILE_PATH, exc))
+        return
 
     missed_words = _combined_missed_words()
     if missed_words:
@@ -1595,6 +1695,7 @@ def append_game_score_records():
             player_scores_file.write(player_line + "\n")
         print("Player score appended: {} -> {}".format(player_file_path, player_line))
     except Exception as exc:
+        sd_write_faulted = True
         print("Player score append failed for {}: {}".format(player_file_path, exc))
 
 
@@ -1668,13 +1769,18 @@ def update_keyboard_panel_image():
         keyboard_page_group.append(keyboard_image_tile)
         return True
 
-    if not keyboard_image_paths:
+    if game_active:
+        if not game_word_list or game_word_index >= len(game_word_list):
+            clear_keyboard_panel_image()
+            return False
         clear_keyboard_panel_image()
-        return False
-
-    clear_keyboard_panel_image()
-
-    image_path = keyboard_image_paths[keyboard_image_index]
+        image_path = game_word_list[game_word_index]
+    else:
+        if not keyboard_image_paths:
+            clear_keyboard_panel_image()
+            return False
+        clear_keyboard_panel_image()
+        image_path = keyboard_image_paths[keyboard_image_index]
     try:
         with open(image_path, "rb") as f:
             keyboard_image_bitmap, keyboard_image_palette = adafruit_imageload.load(f)
@@ -1778,6 +1884,8 @@ def add_button(
         "name": name,
         "role": role,
         "text": text,
+        "visible": True,
+        "active": True,
         "tile": button_tile,
         "label": button_label,
         "x0": x,
@@ -1832,9 +1940,36 @@ def build_main_page():
     add_background(page)
     add_shared_page_chrome(page, "main")
 
+    # Add dark background panel for the image placeholder (same as on the keyboard page)
+    panel_bitmap = displayio.Bitmap(IMAGE_PANEL_SIZE, IMAGE_PANEL_SIZE, 1)
+    panel_palette = displayio.Palette(1)
+    panel_palette[0] = DARK_PANEL_COLOR
+    page.append(displayio.TileGrid(panel_bitmap, pixel_shader=panel_palette, x=IMAGE_PANEL_X, y=IMAGE_PANEL_Y))
+
+    # Display _sbee.bmp if available
+    sbee_path = "/sd/imgs/_sbee.bmp"
+    try:
+        f = open(sbee_path, "rb")
+        f.close()
+    except OSError:
+        sbee_path = "/sd/img/_sbee.bmp"
+
+    try:
+        with open(sbee_path, "rb") as f:
+            sbee_bitmap, sbee_palette = adafruit_imageload.load(f)
+        sbee_tile = displayio.TileGrid(
+            sbee_bitmap,
+            pixel_shader=sbee_palette,
+            x=IMAGE_PANEL_X,
+            y=IMAGE_PANEL_Y,
+        )
+        page.append(sbee_tile)
+    except Exception as exc:
+        print("Failed to load startup bee image {}: {}".format(sbee_path, exc))
+
     startup_title_label = label.Label(FONTS["title"], text="Spell Game", color=TITLE_TEXT_COLOR)
     startup_title_label.anchor_point = (0.5, 0.5)
-    startup_title_label.anchored_position = (DISPLAY_WIDTH // 2, 88)
+    startup_title_label.anchored_position = (DISPLAY_WIDTH // 2, 300)
     page.append(startup_title_label)
 
     startup_prompt_label = label.Label(FONTS["button"], text="Press START", color=TITLE_TEXT_COLOR)
@@ -1928,7 +2063,7 @@ def build_main_page():
 
 
 def build_keyboard_page():
-    global answer_display_label, keyboard_page_group, keyboard_mode_label
+    global answer_display_label, keyboard_page_group, keyboard_mode_label, keyboard_answer_button
 
     page = displayio.Group()
     keyboard_page_group = page
@@ -1953,7 +2088,7 @@ def build_keyboard_page():
         font_key="small_button",
     )
 
-    add_button(
+    keyboard_answer_button = add_button(
         page,
         "keyboard",
         DISPLAY_WIDTH - FLOW_BUTTON_MARGIN - 88,
@@ -1966,6 +2101,7 @@ def build_keyboard_page():
         font_key="small_button",
         fill_color=0x1A6B3A,
     )
+    _set_keyboard_answer_button_visible(False)
 
     answer_display_label = label.Label(FONTS["button"], text="_", color=TITLE_TEXT_COLOR)
     answer_display_label.anchor_point = (0.5, 0.5)
@@ -2314,6 +2450,10 @@ def button_from_touch(x, y):
     for button in BUTTON_REGISTRY:
         if button["page"] != current_page_name:
             continue
+        if not button.get("active", True):
+            continue
+        if not button.get("visible", True):
+            continue
         if button["x0"] <= x < button["x1"] and button["y0"] <= y < button["y1"]:
             return button
     return None
@@ -2327,7 +2467,7 @@ def show_page(page_name):
 
 def handle_button_press(button):
     global answer_display_text, startup_player_page, startup_step, startup_new_player_text
-    global game_active, game_word_index, game_total, game_correct, game_correct_total
+    global game_active, game_word_index, game_total, game_correct, game_correct_total, game_current_word_wrong_attempts
 
     play_button_feedback()
 
@@ -2454,11 +2594,8 @@ def handle_button_press(button):
         return
 
     if button["role"] == "show_answer" and current_page_name == "keyboard":
-        clear_answer_text()
-        mark_hint_for_current_word()
-        show_correct_answer_hint()
         if game_active:
-            set_gameplay_np_color(NP_HINT_CYAN)
+            reveal_answer_for_current_word()
         return
 
     if current_page_name != "keyboard":
@@ -2474,7 +2611,7 @@ def handle_button_press(button):
         expected_answer = current_prompt_answer()
         typed_answer = answer_display_text.lower()
         if expected_answer and typed_answer == expected_answer:
-            print("Correct: {}".format(typed_answer))
+            print("Correct: {} ({})".format(typed_answer, _gameplay_memory_text()))
             if game_active:
                 game_correct_total += 1
                 if not game_current_word_hint_used:
@@ -2482,21 +2619,23 @@ def handle_button_press(button):
                 set_gameplay_np_color(NP_CORRECT_GREEN)
             play_result_feedback(True)
             clear_last_answer_label()
+            _set_keyboard_answer_button_visible(False)
             cycle_keyboard_panel_image()
             if current_page_name == "keyboard" and current_mode == MODE_AUDIO and not game_active:
                 play_word_audio_for_current_image()
         else:
-            print("Incorrect: '{}' expected '{}'".format(typed_answer, expected_answer))
+            print("Incorrect: '{}' expected '{}' ({})".format(typed_answer, expected_answer, _gameplay_memory_text()))
             show_wrong_answer_label(answer_display_text)
             if game_active:
-                set_gameplay_np_color(NP_INCORRECT_RED)
+                game_current_word_wrong_attempts += 1
+                set_gameplay_wrong_attempt_leds(game_current_word_wrong_attempts)
+                _set_keyboard_answer_button_visible(True)
                 if not game_current_word_hint_used:
                     _track_wrong_no_hint_word(expected_answer)
             play_result_feedback(False)
             clear_answer_text()
-            if game_active:
-                # Keep the displayed prompt aligned with the current randomized game word.
-                show_current_game_word()
+            if game_active and game_current_word_wrong_attempts >= 3:
+                reveal_answer_for_current_word()
             else:
                 update_keyboard_panel_image()
                 if current_mode == MODE_AUDIO:

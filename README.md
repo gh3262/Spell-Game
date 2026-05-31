@@ -16,8 +16,9 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
         - Underscore-prefixed WAVs are reserved for startup/system use and are ignored during gameplay prompt loading.
         - Runtime data files in SD root:
             - `/sd/players.txt` (active players)
-            - `/sd/tplayers.txt` (template players for reset)
             - `/sd/scores.txt` (saved scores)
+        - Runtime template file on board root:
+            - `/tplayers.txt` (template players used to heal missing/empty `/sd/players.txt`)
         - Sample copies for these text files are in repo folder: `files/`
 4. Reset the board and verify the title screen appears.
 
@@ -25,10 +26,12 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
 ```text
 /sd/
     players.txt
-    tplayers.txt
     scores.txt
     imgs/
     wavs/
+
+/
+    tplayers.txt
 ```
 
 ## Session Updates (2026-05-19)
@@ -52,6 +55,14 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
 - Gameplay audio prompt loading now ignores underscore-prefixed WAVs, matching the reserved-asset rule already used for underscore-prefixed BMPs.
 - Player selection now pages through names using `MORE` until the final page, where the fourth button becomes `NEW`.
 
+## Session Updates (2026-05-31)
+- Gameplay image panel now binds to the active round word during gameplay, so displayed image always matches `game_word_list[game_word_index]`.
+- Main startup page now renders a dark image panel plus `_sbee.bmp` placeholder with fallback path handling.
+- Startup title was repositioned lower to fit the startup image treatment.
+- Player-list self-heal now restores `/sd/players.txt` from board-root `/tplayers.txt` when players file is missing or empty.
+- Restore path now includes a guard: if `/tplayers.txt` cannot be read, restore is skipped and normal fallback behavior continues.
+- Ongoing workflow note: gameplay improvements may land on one hardware platform first, then get ported to the other after validation.
+
 ## Deployment Checklist
 1. Confirm local `code.py` saves cleanly and contains no syntax errors.
 2. Copy updated app code to the board (`D:\code.py`).
@@ -66,21 +77,22 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
     - plus board-support libs already used by this project
 4. Verify SD card root files exist:
     - `/sd/players.txt`
-    - `/sd/tplayers.txt`
     - `/sd/scores.txt`
-5. Verify SD card asset folders exist and are populated:
+5. Verify board-root template exists:
+    - `/tplayers.txt`
+6. Verify SD card asset folders exist and are populated:
     - `/sd/imgs/*.bmp`
     - `/sd/wavs/*.wav`
     - Reserved startup/system clips may exist as `/sd/wavs/_*.wav`; these are excluded from gameplay prompt lists
-6. Hardware sanity check after reboot:
+7. Hardware sanity check after reboot:
     - Display initializes
     - Touch responds
     - One startup `_start*.wav` clip plays
     - RTC initializes (or logs a clear fallback message)
-7. Functional smoke test:
+8. Functional smoke test:
     - Picture mode: select 10 words, confirm randomized list behavior and stop at 10
     - Audio mode: confirm no duplicate prompt playback and prompt advances correctly
-8. Optional pre-push cleanup:
+9. Optional pre-push cleanup:
     - Reduce debug logging volume if no longer needed
     - Keep only diagnostics needed for field troubleshooting
 
