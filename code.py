@@ -9,6 +9,7 @@ import array
 import audiocore
 import audiobusio
 import gc
+import json
 import math
 import os
 import sdcardio
@@ -124,6 +125,12 @@ AUDIO_STARTUP_WAVS = (
 )
 AUDIO_WORDS_DIR = "/sd/wavs"
 AUDIOMODE_IMAGE_CANDIDATES = ("/sd/img/_audio.bmp", "/sd/imgs/_audio.bmp")
+PICTUREMODE_IDLE_IMAGE_CANDIDATES = (
+    "/sd/imgs/_spbee.bmp",
+    "/sd/img/_spbee.bmp",
+    "/sd/imgs/_sbee.bmp",
+    "/sd/img/_sbee.bmp",
+)
 MODE_PICTURE = "picture"
 MODE_SOUND = "sound"
 MODE_AUDIO = MODE_SOUND
@@ -227,9 +234,22 @@ SCORES_FILE_PATH = "/sd/scores.txt"
 IMAGE_SELECTION_LOG_PATH = "/sd/image.txt"
 AUDIO_SELECTION_LOG_PATH = "/sd/audio.txt"
 ENABLE_SELECTION_DEBUG_LOG = False
+SUMMARY_TOP_COUNT = 10
+SUMMARY_PAGE_LPS_PICTURE = "summary_lps_picture"
+SUMMARY_PAGE_LPS_SOUND = "summary_lps_sound"
+SUMMARY_PAGE_FIRST_TRY = "summary_first_try"
+SUMMARY_PAGE_GPW = "summary_gpw"
+GPW_WORD_LENGTHS = ("3", "4", "5", "6", "6+")
+SUMMARY_PAGE_ORDER = (
+    "main",
+    SUMMARY_PAGE_LPS_PICTURE,
+    SUMMARY_PAGE_LPS_SOUND,
+    SUMMARY_PAGE_FIRST_TRY,
+    SUMMARY_PAGE_GPW,
+)
 
 STATS_FILE_PATH = "/sd/stats.json"
-DEFAULT_STATS = {"total_games": 0, "total_correct": 0, "high_score": 0}
+DEFAULT_STATS = {"total_games": 0, "total_correct": 0, "high_score": 0, "total_time": 0.0, "total_guesses": 0}
 
 audio_out = None
 audio_enable = None
@@ -242,9 +262,11 @@ sd_write_faulted = False
 startup_title_label = None
 startup_prompt_label = None
 startup_summary_label = None
+startup_error_label = None
 startup_start_button = None
 startup_option_buttons = []
 startup_option_actions = [None, None, None, None]
+startup_error_text = ""
 
 STARTUP_STEP_READY = "ready"
 STARTUP_STEP_PLAYER = "player"
@@ -297,6 +319,10 @@ game_current_word_wrong_attempts = 0
 game_active = False
 game_wrong_no_hint_words = []
 game_skipped_words = []
+game_round_start_time = None
+game_round_elapsed_seconds = 0.0
+game_total_guesses = 0
+game_first_try_correct_count = 0
 
 results_player_label = None
 results_total_label = None
@@ -304,62 +330,130 @@ results_attempted_label = None
 results_correct_no_hint_label = None
 results_correct_with_hint_label = None
 results_percent_no_hint_label = None
+results_time_label = None
+results_guesses_label = None
+summary_lps_picture_labels = []
+summary_lps_sound_labels = []
+summary_first_try_labels = []
+summary_gpw_player_label = None
+summary_gpw_row_labels = []
+summary_gpw_current_player_index = 0
 
 
 def _normalize_player_name(name_text):
     return name_text.strip()
 
 
-def load_player_names(file_path=PLAYERS_FILE_PATH):
-    global startup_player_names
-
-    # If players.txt is missing or empty, restore from the root template file.
-    file_exists_and_valid = False
+def _exception_errno(exc):
     try:
-        with open(file_path, "r") as players_file:
-            for line in players_file:
-                if _normalize_player_name(line):
-                    file_exists_and_valid = True
-                    break
+        return exc.errno
     except Exception:
-        pass
+        return None
 
-    if not file_exists_and_valid:
-        template_content = None
+
+def _is_io_error(exc):
+    return _exception_errno(exc) == 5
+
+
+def _is_missing_file_error(exc):
+    return _exception_errno(exc) == 2
+
+
+def _read_text_with_retry(file_path, attempts=3):
+    last_exc = None
+    for attempt in range(attempts):
         try:
-            with open(TPLAYERS_FILE_PATH, "r") as template_file:
-                template_content = template_file.read()
-        except Exception:
-            template_content = None
+            with open(file_path, "r") as source_file:
+                return source_file.read(), None
+        except Exception as exc:
+            last_exc = exc
+            if _is_io_error(exc) and attempt + 1 < attempts:
+                gc.collect()
+                time.sleep(0.05)
+                continue
+            break
+    return None, last_exc
 
-        if template_content is not None:
-            print("players.txt is missing or empty. Restoring from template...")
-            try:
-                with open(file_path, "w") as players_file:
-                    players_file.write(template_content)
-                print("Successfully copied {} to {}".format(TPLAYERS_FILE_PATH, file_path))
-            except Exception as exc:
-                print("Failed to restore players.txt from {}: {}".format(TPLAYERS_FILE_PATH, exc))
 
-    try:
-        with open(file_path, "r") as players_file:
-            lines = players_file.readlines()
-    except Exception as exc:
-        print("Player list read failed for {}: {}".format(file_path, exc))
-        startup_player_names = ["PLAYER 1"]
-        return False
+def _write_text_with_retry(file_path, text_data, attempts=3):
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            with open(file_path, "w") as destination_file:
+                destination_file.write(text_data)
+            return True, None
+        except Exception as exc:
+            last_exc = exc
+            if _is_io_error(exc) and attempt + 1 < attempts:
+                gc.collect()
+                time.sleep(0.05)
+                continue
+            break
+    return False, last_exc
 
+
+def _parse_player_names(text_data):
     names = []
-    for line in lines:
+    for line in text_data.splitlines():
         candidate = _normalize_player_name(line)
         if candidate:
             names.append(candidate)
+    return names
 
-    if not names:
-        names = ["PLAYER 1"]
 
-    startup_player_names = names
-    return True
+def load_player_names(file_path=PLAYERS_FILE_PATH):
+    global startup_player_names
+
+    cached_names = []
+    for existing_name in startup_player_names:
+        normalized = _normalize_player_name(existing_name)
+        if normalized:
+            cached_names.append(normalized)
+
+    players_text, players_read_exc = _read_text_with_retry(file_path)
+    if players_text is not None:
+        parsed_names = _parse_player_names(players_text)
+        if parsed_names:
+            startup_player_names = parsed_names
+            return True
+    elif players_read_exc is not None and not _is_missing_file_error(players_read_exc):
+        print("Player list read failed for {}: {}".format(file_path, players_read_exc))
+        if cached_names:
+            startup_player_names = cached_names
+            print("Using cached player list after read failure.")
+        else:
+            startup_player_names = ["PLAYER 1"]
+        return False
+
+    print("players.txt is missing or empty. Restoring from template...")
+    template_content, template_read_exc = _read_text_with_retry(TPLAYERS_FILE_PATH)
+    if template_content is None:
+        if template_read_exc is not None:
+            print("Failed to read template {}: {}".format(TPLAYERS_FILE_PATH, template_read_exc))
+    else:
+        restore_ok, restore_exc = _write_text_with_retry(file_path, template_content)
+        if restore_ok:
+            print("Successfully copied {} to {}".format(TPLAYERS_FILE_PATH, file_path))
+        else:
+            print("Failed to restore players.txt from {}: {}".format(TPLAYERS_FILE_PATH, restore_exc))
+
+    players_text, players_read_exc = _read_text_with_retry(file_path)
+    if players_text is not None:
+        parsed_names = _parse_player_names(players_text)
+        if parsed_names:
+            startup_player_names = parsed_names
+            return True
+
+    if players_read_exc is not None:
+        print("Player list read failed for {}: {}".format(file_path, players_read_exc))
+
+    if cached_names:
+        startup_player_names = cached_names
+        print("Using cached player list after restore failure.")
+    else:
+        startup_player_names = ["PLAYER 1"]
+
+    return False
 
 
 def save_player_names(file_path=PLAYERS_FILE_PATH):
@@ -547,6 +641,8 @@ def update_startup_ui():
         return
 
     startup_summary_label.text = _startup_summary_text()
+    if startup_error_label is not None:
+        startup_error_label.text = startup_error_text
 
     if startup_step == STARTUP_STEP_READY:
         startup_prompt_label.text = "Press START"
@@ -660,6 +756,7 @@ def reset_game_session_state(clear_word_list=False):
     global game_word_list, game_word_index, game_total, game_correct, game_correct_total
     global game_skipped, game_hints_used, game_current_word_hint_used, game_hint_word_index, game_current_word_wrong_attempts, game_active
     global game_wrong_no_hint_words, game_skipped_words
+    global game_round_start_time, game_round_elapsed_seconds, game_total_guesses, game_first_try_correct_count
 
     if clear_word_list:
         game_word_list = []
@@ -675,7 +772,38 @@ def reset_game_session_state(clear_word_list=False):
     game_active = False
     game_wrong_no_hint_words = []
     game_skipped_words = []
+    game_round_start_time = None
+    game_round_elapsed_seconds = 0.0
+    game_total_guesses = 0
+    game_first_try_correct_count = 0
     _set_keyboard_answer_button_visible(False)
+
+
+def set_startup_error_message(message_text=""):
+    global startup_error_text
+    startup_error_text = message_text
+    if startup_error_label is not None:
+        startup_error_label.text = startup_error_text
+
+
+def abort_game_due_to_asset_failure(asset_path, exc, failure_kind):
+    global game_active, startup_step, startup_player_page, startup_new_player_text
+
+    print("{} for {}: {}".format(failure_kind, asset_path, exc))
+    game_active = False
+    stop_audio_session()
+    set_gameplay_np_color(NP_OFF)
+    clear_answer_text()
+    refresh_answer_display()
+    _set_keyboard_answer_button_visible(False)
+    startup_step = STARTUP_STEP_READY
+    startup_player_page = 0
+    startup_new_player_text = ""
+    set_startup_error_message("ASSET READ FAILED\nRESTART DEVICE")
+    _set_page_flow_back_button_text("keyboard", "BACK", BUTTON_FILL_COLOR)
+    show_page("main")
+    update_startup_ui()
+    update_status_line(force=True)
 
 
 def finalize_startup_flow():
@@ -683,6 +811,7 @@ def finalize_startup_flow():
     global game_word_list, game_word_index, game_total, game_correct, game_correct_total, game_skipped, game_active
     global game_hints_used, game_current_word_hint_used, game_hint_word_index
     global game_wrong_no_hint_words, game_skipped_words
+    global game_round_start_time, game_round_elapsed_seconds, game_total_guesses, game_first_try_correct_count
     global startup_step
     set_game_mode(startup_selected_mode)
     # Select the correct asset list
@@ -721,6 +850,10 @@ def finalize_startup_flow():
     game_active = True
     game_wrong_no_hint_words = []
     game_skipped_words = []
+    game_round_start_time = time.monotonic()
+    game_round_elapsed_seconds = 0.0
+    game_total_guesses = 0
+    game_first_try_correct_count = 0
     print(
         "Start game: player='{}' mode='{}' length='{}' words={}".format(
             startup_selected_player,
@@ -734,6 +867,7 @@ def finalize_startup_flow():
         start_audio_session()
     else:
         stop_audio_session()
+    set_startup_error_message("")
     _set_page_flow_back_button_text("keyboard", "QUIT", MATH_GAME_ORANGE)
     show_page("keyboard")
     show_current_game_word()
@@ -776,7 +910,8 @@ def show_current_game_word():
             keyboard_page_group.append(keyboard_image_tile)
             print("[DEBUG] Image loaded and displayed successfully ({})".format(_gameplay_memory_text()))
         except Exception as exc:
-            print("Failed to load image {}: {}".format(image_path, exc))
+            abort_game_due_to_asset_failure(image_path, exc, "Failed to load image")
+            return
     else:
         # Play audio directly from the randomized list
         audio_path = game_word_list[game_word_index]
@@ -785,9 +920,11 @@ def show_current_game_word():
             global audio_word_index
             audio_word_index = audio_word_paths.index(audio_path)
             update_keyboard_panel_image()
-            play_word_audio_for_current_image()
+            if not play_word_audio_for_current_image():
+                raise RuntimeError("audio playback failed")
         except Exception as exc:
-            print("Failed to play audio {}: {}".format(audio_path, exc))
+            abort_game_due_to_asset_failure(audio_path, exc, "Failed to play audio")
+            return
     clear_answer_text()
     refresh_answer_display()
     update_status_line(force=True)
@@ -1651,9 +1788,31 @@ def append_game_score_records():
     correct_with_hint = game_correct_total - game_correct
     if correct_with_hint < 0:
         correct_with_hint = 0
+    total_correct = game_correct_total
+    wrong_guess_count = game_total_guesses - total_correct
+    if wrong_guess_count < 0:
+        wrong_guess_count = 0
+    if game_total > 0:
+        completion_rate = (total_correct * 100) / game_total
+    else:
+        completion_rate = 0.0
+
+    round_elapsed_seconds = _finalize_round_elapsed_seconds()
+    if attempted > 0:
+        seconds_per_word = round_elapsed_seconds / attempted
+        guesses_per_word = game_total_guesses / attempted
+    else:
+        seconds_per_word = 0.0
+        guesses_per_word = 0.0
+
+    total_letters = _attempted_total_letters(attempted)
+    if total_letters > 0:
+        seconds_per_letter = round_elapsed_seconds / total_letters
+    else:
+        seconds_per_letter = 0.0
 
     player_text = startup_selected_player if startup_selected_player else "PLAYER"
-    shared_line = "{},{},{},{},{},{},{}".format(
+    shared_line = "{},{},{},{},{},{},{},{:.2f},{},{:.2f},{:.2f},{:.2f},{},{},{},{},{},{:.2f}".format(
         player_text,
         timestamp_text,
         mode_text,
@@ -1661,6 +1820,17 @@ def append_game_score_records():
         attempted,
         correct_no_hint,
         correct_with_hint,
+        round_elapsed_seconds,
+        game_total_guesses,
+        seconds_per_word,
+        seconds_per_letter,
+        guesses_per_word,
+        startup_selected_word_length,
+        game_hints_used,
+        game_first_try_correct_count,
+        total_correct,
+        wrong_guess_count,
+        completion_rate,
     )
 
     try:
@@ -1679,13 +1849,24 @@ def append_game_score_records():
         missed_text = "-"
 
     player_file_path = "/sd/{}_scores.txt".format(_safe_player_file_token(player_text))
-    player_line = "{},{},{},{},{},{},{},{}".format(
+    player_line = "{},{},{},{},{},{},{:.2f},{},{:.2f},{:.2f},{:.2f},{},{},{},{},{},{:.2f},{},{}".format(
         timestamp_text,
         mode_text,
         selected_count,
         attempted,
         correct_no_hint,
         correct_with_hint,
+        round_elapsed_seconds,
+        game_total_guesses,
+        seconds_per_word,
+        seconds_per_letter,
+        guesses_per_word,
+        startup_selected_word_length,
+        game_hints_used,
+        game_first_try_correct_count,
+        total_correct,
+        wrong_guess_count,
+        completion_rate,
         len(missed_words),
         missed_text,
     )
@@ -1697,6 +1878,361 @@ def append_game_score_records():
     except Exception as exc:
         sd_write_faulted = True
         print("Player score append failed for {}: {}".format(player_file_path, exc))
+
+
+def _round_total_letters():
+    total_letters = 0
+
+    for asset_path in game_word_list[:game_total]:
+        answer = _answer_from_asset_path(asset_path)
+        if answer:
+            total_letters += len(answer)
+
+    if total_letters > 0:
+        return total_letters
+
+    fallback_length = 0
+    try:
+        fallback_length = int(startup_selected_word_length)
+    except Exception:
+        if startup_selected_word_length == "6+":
+            fallback_length = 6
+
+    if fallback_length > 0 and game_total > 0:
+        return fallback_length * game_total
+
+    return 0
+
+
+def _attempted_total_letters(attempted_count):
+    if attempted_count <= 0:
+        return 0
+
+    total_letters = 0
+    max_index = min(attempted_count, len(game_word_list))
+    for asset_path in game_word_list[:max_index]:
+        answer = _answer_from_asset_path(asset_path)
+        if answer:
+            total_letters += len(answer)
+
+    if total_letters > 0:
+        return total_letters
+
+    fallback_length = 0
+    try:
+        fallback_length = int(startup_selected_word_length)
+    except Exception:
+        if startup_selected_word_length == "6+":
+            fallback_length = 6
+
+    if fallback_length > 0:
+        return fallback_length * attempted_count
+
+    return 0
+
+
+def _safe_float(value_text, default_value=0.0):
+    try:
+        return float(value_text)
+    except Exception:
+        return default_value
+
+
+def _safe_int(value_text, default_value=0):
+    try:
+        return int(value_text)
+    except Exception:
+        return default_value
+
+
+def _compact_score_timestamp(timestamp_text):
+    if len(timestamp_text) >= 13 and timestamp_text[8] == "_":
+        return "{}-{} {}:{}".format(
+            timestamp_text[4:6],
+            timestamp_text[6:8],
+            timestamp_text[9:11],
+            timestamp_text[11:13],
+        )
+    return timestamp_text
+
+
+def _load_score_records():
+    records = []
+    text_data, read_exc = _read_text_with_retry(SCORES_FILE_PATH)
+    if read_exc is not None or text_data is None:
+        return records
+
+    for line_text in text_data.splitlines():
+        row_text = line_text.strip()
+        if not row_text:
+            continue
+        fields = row_text.split(",")
+        if len(fields) < 18:
+            continue
+
+        player_name = fields[0].strip() if fields[0].strip() else "-"
+        timestamp_text = fields[1].strip()
+        mode_text = fields[2].strip().lower()
+        attempted = _safe_int(fields[4], 0)
+        game_total_guesses_rec = _safe_int(fields[8], 0)
+        seconds_per_letter = _safe_float(fields[10], 0.0)
+        word_length = fields[12].strip()
+        first_try_correct = _safe_int(fields[14], 0)
+
+        records.append(
+            {
+                "player": player_name,
+                "timestamp": timestamp_text,
+                "mode": mode_text,
+                "attempted": attempted,
+                "game_total_guesses": game_total_guesses_rec,
+                "seconds_per_letter": seconds_per_letter,
+                "word_length": word_length,
+                "first_try_correct": first_try_correct,
+            }
+        )
+
+    return records
+
+
+def _set_summary_rows(label_list, row_texts):
+    for index in range(SUMMARY_TOP_COUNT):
+        if index < len(row_texts):
+            label_list[index].text = "{:2d}. {}".format(index + 1, row_texts[index])
+        else:
+            label_list[index].text = "{:2d}. -".format(index + 1)
+
+
+def refresh_best_seconds_per_letter(mode_text, label_list):
+    records = _load_score_records()
+    ranked = []
+
+    for record in records:
+        if record["mode"] != mode_text:
+            continue
+        seconds_per_letter = record["seconds_per_letter"]
+        if seconds_per_letter <= 0:
+            continue
+        ranked.append(
+            (
+                seconds_per_letter,
+                "{} {} - {:.2f}s".format(
+                    record["player"][:10],
+                    _compact_score_timestamp(record["timestamp"]),
+                    seconds_per_letter,
+                ),
+            )
+        )
+
+    ranked.sort(key=lambda item: item[0])  # ascending: lower sec/letter = better
+    _set_summary_rows(label_list, [item[1] for item in ranked[:SUMMARY_TOP_COUNT]])
+
+
+def refresh_first_try_summary(label_list):
+    records = _load_score_records()
+    ranked = []
+
+    for record in records:
+        attempted = record["attempted"]
+        if attempted <= 0:
+            continue
+        first_try_pct = (record["first_try_correct"] * 100.0) / attempted
+        mode_short = "PIC" if record["mode"] == "picture" else "SND"
+        is_sound = record["mode"] == "sound"
+        ranked.append(
+            (
+                first_try_pct,
+                "{} {} - {} {:.1f}%".format(
+                    record["player"][:8],
+                    _compact_score_timestamp(record["timestamp"]),
+                    mode_short,
+                    first_try_pct,
+                ),
+                is_sound,
+            )
+        )
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    top = ranked[:SUMMARY_TOP_COUNT]
+    for index in range(SUMMARY_TOP_COUNT):
+        if index < len(top):
+            _, row_text, is_sound = top[index]
+            label_list[index].text = "{:2d}. {}".format(index + 1, row_text)
+            label_list[index].color = VOWEL_TEXT_COLOR if is_sound else TITLE_TEXT_COLOR
+        else:
+            label_list[index].text = "{:2d}. -".format(index + 1)
+            label_list[index].color = STATUS_TEXT_COLOR
+
+
+def _fmt_gpw_value(value):
+    if value is None:
+        return " ---"
+    return "{:4.2f}".format(value)
+
+
+def _fmt_word_count(value):
+    return "{:4d}".format(max(0, int(value)))
+
+
+def _gpw_calc(record_list):
+    total_guesses = 0
+    total_attempted = 0
+    for r in record_list:
+        total_guesses += r["game_total_guesses"]
+        total_attempted += r["attempted"]
+    if total_attempted > 0:
+        return total_guesses / total_attempted
+    return None
+
+
+def _attempted_word_count(record_list):
+    total_attempted = 0
+    for r in record_list:
+        total_attempted += r["attempted"]
+    return total_attempted
+
+
+def _today_day_number():
+    try:
+        now = time.localtime()
+        t = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))
+        return t // 86400
+    except Exception:
+        return -1
+
+
+def _record_day_number(timestamp_text):
+    try:
+        year = int(timestamp_text[0:4])
+        month = int(timestamp_text[4:6])
+        day = int(timestamp_text[6:8])
+        t = time.mktime((year, month, day, 0, 0, 0, 0, 0, -1))
+        return t // 86400
+    except Exception:
+        return -1
+
+
+def refresh_gpw_page(player_index):
+    global summary_gpw_current_player_index
+
+    if not startup_player_names:
+        return
+
+    player_index = max(0, min(player_index, len(startup_player_names) - 1))
+    summary_gpw_current_player_index = player_index
+    player_name = startup_player_names[player_index]
+
+    if summary_gpw_player_label is not None:
+        summary_gpw_player_label.text = "{} ({}/{})".format(
+            player_name[:14], player_index + 1, len(startup_player_names)
+        )
+
+    if not summary_gpw_row_labels:
+        return
+
+    records = _load_score_records()
+    player_records = [r for r in records if r["player"] == player_name]
+
+    today_day = _today_day_number()
+    if today_day >= 0:
+        recent_records = [
+            r for r in player_records
+            if (today_day - _record_day_number(r["timestamp"])) <= 2
+        ]
+    else:
+        recent_records = []
+
+    summary_gpw_row_labels[0].text = "{:<10} {:>4}  {:>4}".format("", "All", "3Day")
+    summary_gpw_row_labels[1].text = "{:<10} {}  {}".format(
+        "Overall",
+        _fmt_gpw_value(_gpw_calc(player_records)),
+        _fmt_gpw_value(_gpw_calc(recent_records)),
+    )
+    summary_gpw_row_labels[2].text = "{:<10} {}  {}".format(
+        "Words",
+        _fmt_word_count(_attempted_word_count(player_records)),
+        _fmt_word_count(_attempted_word_count(recent_records)),
+    )
+    for idx, wlen in enumerate(GPW_WORD_LENGTHS):
+        all_wl = [r for r in player_records if r["word_length"] == wlen]
+        rec_wl = [r for r in recent_records if r["word_length"] == wlen]
+        summary_gpw_row_labels[3 + idx].text = "{:<10} {}  {}".format(
+            "Len " + wlen,
+            _fmt_gpw_value(_gpw_calc(all_wl)),
+            _fmt_gpw_value(_gpw_calc(rec_wl)),
+        )
+
+
+def refresh_start_summary_page(page_name):
+    if page_name == SUMMARY_PAGE_LPS_PICTURE:
+        refresh_best_seconds_per_letter("picture", summary_lps_picture_labels)
+        return
+    if page_name == SUMMARY_PAGE_LPS_SOUND:
+        refresh_best_seconds_per_letter("sound", summary_lps_sound_labels)
+        return
+    if page_name == SUMMARY_PAGE_FIRST_TRY:
+        refresh_first_try_summary(summary_first_try_labels)
+        return
+    if page_name == SUMMARY_PAGE_GPW:
+        refresh_gpw_page(0)
+
+
+def _summary_page_next(current_name):
+    try:
+        current_index = SUMMARY_PAGE_ORDER.index(current_name)
+    except Exception:
+        return "main"
+    return SUMMARY_PAGE_ORDER[(current_index + 1) % len(SUMMARY_PAGE_ORDER)]
+
+
+def _summary_page_prev(current_name):
+    try:
+        current_index = SUMMARY_PAGE_ORDER.index(current_name)
+    except Exception:
+        return "main"
+    return SUMMARY_PAGE_ORDER[(current_index - 1) % len(SUMMARY_PAGE_ORDER)]
+
+
+def _finalize_round_elapsed_seconds():
+    global game_round_elapsed_seconds
+
+    if game_round_elapsed_seconds > 0:
+        return game_round_elapsed_seconds
+
+    if game_round_start_time is None:
+        game_round_elapsed_seconds = 0.0
+        return game_round_elapsed_seconds
+
+    elapsed = time.monotonic() - game_round_start_time
+    if elapsed < 0:
+        elapsed = 0.0
+    game_round_elapsed_seconds = elapsed
+    return game_round_elapsed_seconds
+
+
+def update_cumulative_game_stats(round_elapsed_seconds, round_total_guesses):
+    if sd_write_faulted:
+        print("Cumulative stats update skipped: SD write faulted")
+        return
+
+    stats = read_game_stats()
+
+    total_time = 0.0
+    try:
+        total_time = float(stats.get("total_time", 0.0))
+    except Exception:
+        total_time = 0.0
+
+    total_guesses = 0
+    try:
+        total_guesses = int(stats.get("total_guesses", 0))
+    except Exception:
+        total_guesses = 0
+
+    stats["total_time"] = round(total_time + round_elapsed_seconds, 2)
+    stats["total_guesses"] = total_guesses + round_total_guesses
+
+    save_game_stats(stats)
 
 
 def clear_keyboard_panel_image():
@@ -1716,6 +2252,23 @@ def clear_keyboard_panel_image():
 
 def resolve_audio_mode_image_path():
     for candidate_path in AUDIOMODE_IMAGE_CANDIDATES:
+        file_handle = None
+        try:
+            file_handle = open(candidate_path, "rb")
+            return candidate_path
+        except Exception:
+            pass
+        finally:
+            if file_handle is not None:
+                try:
+                    file_handle.close()
+                except Exception:
+                    pass
+    return None
+
+
+def resolve_picture_mode_idle_image_path():
+    for candidate_path in PICTUREMODE_IDLE_IMAGE_CANDIDATES:
         file_handle = None
         try:
             file_handle = open(candidate_path, "rb")
@@ -1776,11 +2329,12 @@ def update_keyboard_panel_image():
         clear_keyboard_panel_image()
         image_path = game_word_list[game_word_index]
     else:
-        if not keyboard_image_paths:
-            clear_keyboard_panel_image()
-            return False
         clear_keyboard_panel_image()
-        image_path = keyboard_image_paths[keyboard_image_index]
+        image_path = resolve_picture_mode_idle_image_path()
+        if image_path is None:
+            if not keyboard_image_paths:
+                return False
+            image_path = keyboard_image_paths[keyboard_image_index]
     try:
         with open(image_path, "rb") as f:
             keyboard_image_bitmap, keyboard_image_palette = adafruit_imageload.load(f)
@@ -1933,7 +2487,7 @@ def add_shared_page_chrome(page_group, page_name):
 
 
 def build_main_page():
-    global startup_title_label, startup_prompt_label, startup_summary_label
+    global startup_title_label, startup_prompt_label, startup_summary_label, startup_error_label
     global startup_start_button, startup_option_buttons
 
     page = displayio.Group()
@@ -1946,26 +2500,20 @@ def build_main_page():
     panel_palette[0] = DARK_PANEL_COLOR
     page.append(displayio.TileGrid(panel_bitmap, pixel_shader=panel_palette, x=IMAGE_PANEL_X, y=IMAGE_PANEL_Y))
 
-    # Display _sbee.bmp if available
-    sbee_path = "/sd/imgs/_sbee.bmp"
-    try:
-        f = open(sbee_path, "rb")
-        f.close()
-    except OSError:
-        sbee_path = "/sd/img/_sbee.bmp"
-
-    try:
-        with open(sbee_path, "rb") as f:
-            sbee_bitmap, sbee_palette = adafruit_imageload.load(f)
-        sbee_tile = displayio.TileGrid(
-            sbee_bitmap,
-            pixel_shader=sbee_palette,
-            x=IMAGE_PANEL_X,
-            y=IMAGE_PANEL_Y,
-        )
-        page.append(sbee_tile)
-    except Exception as exc:
-        print("Failed to load startup bee image {}: {}".format(sbee_path, exc))
+    startup_image_path = resolve_picture_mode_idle_image_path()
+    if startup_image_path is not None:
+        try:
+            with open(startup_image_path, "rb") as f:
+                startup_bitmap, startup_palette = adafruit_imageload.load(f)
+            startup_tile = displayio.TileGrid(
+                startup_bitmap,
+                pixel_shader=startup_palette,
+                x=IMAGE_PANEL_X,
+                y=IMAGE_PANEL_Y,
+            )
+            page.append(startup_tile)
+        except Exception as exc:
+            print("Failed to load startup image {}: {}".format(startup_image_path, exc))
 
     startup_title_label = label.Label(FONTS["title"], text="Spell Game", color=TITLE_TEXT_COLOR)
     startup_title_label.anchor_point = (0.5, 0.5)
@@ -1981,6 +2529,11 @@ def build_main_page():
     startup_summary_label.anchor_point = (0.5, 0.5)
     startup_summary_label.anchored_position = (DISPLAY_WIDTH // 2, 182)
     page.append(startup_summary_label)
+
+    startup_error_label = label.Label(FONTS["small_button"], text="", color=WRONG_ANSWER_COLOR)
+    startup_error_label.anchor_point = (0.5, 0.5)
+    startup_error_label.anchored_position = (DISPLAY_WIDTH // 2, 118)
+    page.append(startup_error_label)
 
     startup_start_button = add_button(
         page,
@@ -2238,6 +2791,7 @@ def build_name_entry_page():
 def build_scores_page():
     global results_player_label, results_total_label, results_attempted_label
     global results_correct_no_hint_label, results_correct_with_hint_label, results_percent_no_hint_label
+    global results_time_label, results_guesses_label
 
     page = displayio.Group()
     add_background(page)
@@ -2278,11 +2832,112 @@ def build_scores_page():
     results_percent_no_hint_label.anchored_position = (24, 272)
     page.append(results_percent_no_hint_label)
 
+    results_time_label = label.Label(FONTS["score"], text="Time (W/L): 0.00 / 0.00", color=STATUS_TEXT_COLOR)
+    results_time_label.anchor_point = (0.0, 0.5)
+    results_time_label.anchored_position = (24, 300)
+    page.append(results_time_label)
+
+    results_guesses_label = label.Label(FONTS["score"], text="Guesses/Word: 0.00", color=STATUS_TEXT_COLOR)
+    results_guesses_label.anchor_point = (0.0, 0.5)
+    results_guesses_label.anchored_position = (24, 328)
+    page.append(results_guesses_label)
+
+    return page
+
+
+def _build_summary_page_rows(page, page_name):
+    rows = []
+    for row_index in range(SUMMARY_TOP_COUNT):
+        row_label = label.Label(FONTS["small_button"], text="{:2d}. -".format(row_index + 1), color=STATUS_TEXT_COLOR)
+        row_label.anchor_point = (0.0, 0.5)
+        row_label.anchored_position = (12, 124 + (row_index * 30))
+        page.append(row_label)
+        rows.append(row_label)
+    return rows
+
+
+def build_summary_lps_picture_page():
+    global summary_lps_picture_labels
+
+    page = displayio.Group()
+    add_background(page)
+    add_shared_page_chrome(page, SUMMARY_PAGE_LPS_PICTURE)
+
+    header = label.Label(FONTS["button"], text="Best Sec/Ltr - Pic", color=TITLE_TEXT_COLOR)
+    header.anchor_point = (0.5, 0.5)
+    header.anchored_position = (DISPLAY_WIDTH // 2, 95)
+    page.append(header)
+
+    summary_lps_picture_labels = _build_summary_page_rows(page, SUMMARY_PAGE_LPS_PICTURE)
+    return page
+
+
+def build_summary_lps_sound_page():
+    global summary_lps_sound_labels
+
+    page = displayio.Group()
+    add_background(page)
+    add_shared_page_chrome(page, SUMMARY_PAGE_LPS_SOUND)
+
+    header = label.Label(FONTS["button"], text="Best Sec/Ltr - Snd", color=TITLE_TEXT_COLOR)
+    header.anchor_point = (0.5, 0.5)
+    header.anchored_position = (DISPLAY_WIDTH // 2, 95)
+    page.append(header)
+
+    summary_lps_sound_labels = _build_summary_page_rows(page, SUMMARY_PAGE_LPS_SOUND)
+    return page
+
+
+def build_summary_first_try_page():
+    global summary_first_try_labels
+
+    page = displayio.Group()
+    add_background(page)
+    add_shared_page_chrome(page, SUMMARY_PAGE_FIRST_TRY)
+
+    header = label.Label(FONTS["button"], text="Top First Try %", color=TITLE_TEXT_COLOR)
+    header.anchor_point = (0.5, 0.5)
+    header.anchored_position = (DISPLAY_WIDTH // 2, 95)
+    page.append(header)
+
+    summary_first_try_labels = _build_summary_page_rows(page, SUMMARY_PAGE_FIRST_TRY)
+    return page
+
+
+def build_summary_gpw_page():
+    global summary_gpw_player_label, summary_gpw_row_labels
+
+    page = displayio.Group()
+    add_background(page)
+    add_shared_page_chrome(page, SUMMARY_PAGE_GPW)
+
+    title_lbl = label.Label(FONTS["button"], text="Guesses Per Word", color=TITLE_TEXT_COLOR)
+    title_lbl.anchor_point = (0.5, 0.5)
+    title_lbl.anchored_position = (DISPLAY_WIDTH // 2, 55)
+    page.append(title_lbl)
+
+    summary_gpw_player_label = label.Label(FONTS["score"], text="---", color=STATUS_TEXT_COLOR)
+    summary_gpw_player_label.anchor_point = (0.5, 0.5)
+    summary_gpw_player_label.anchored_position = (DISPLAY_WIDTH // 2, 82)
+    page.append(summary_gpw_player_label)
+
+    row_y_positions = (104, 128, 152, 176, 200, 224, 248, 272)
+    summary_gpw_row_labels = []
+    for row_y in row_y_positions:
+        row_lbl = label.Label(FONTS["small_button"], text="-", color=STATUS_TEXT_COLOR)
+        row_lbl.anchor_point = (0.0, 0.5)
+        row_lbl.anchored_position = (12, row_y)
+        page.append(row_lbl)
+        summary_gpw_row_labels.append(row_lbl)
+
     return page
 
 
 def show_results_page():
     append_game_score_records()
+
+    round_elapsed_seconds = _finalize_round_elapsed_seconds()
+    update_cumulative_game_stats(round_elapsed_seconds, game_total_guesses)
 
     attempted = game_total - game_skipped
     if attempted < 0:
@@ -2301,6 +2956,19 @@ def show_results_page():
     else:
         raw_percent_no_hint = 0
 
+    if attempted > 0:
+        seconds_per_word = round_elapsed_seconds / attempted
+        guesses_per_word = game_total_guesses / attempted
+    else:
+        seconds_per_word = 0.0
+        guesses_per_word = 0.0
+
+    total_letters = _attempted_total_letters(attempted)
+    if total_letters > 0:
+        seconds_per_letter = round_elapsed_seconds / total_letters
+    else:
+        seconds_per_letter = 0.0
+
     if results_player_label is not None:
         results_player_label.text = "Player: {}".format(startup_selected_player if startup_selected_player else "-")
     if results_total_label is not None:
@@ -2313,6 +2981,10 @@ def show_results_page():
         results_correct_with_hint_label.text = "Correct (With Hint): {}".format(correct_with_hint)
     if results_percent_no_hint_label is not None:
         results_percent_no_hint_label.text = "% No Hint: {:.1f}%".format(raw_percent_no_hint)
+    if results_time_label is not None:
+        results_time_label.text = "Time (W/L): {:.2f} / {:.2f}".format(seconds_per_word, seconds_per_letter)
+    if results_guesses_label is not None:
+        results_guesses_label.text = "Guesses/Word: {:.2f}".format(guesses_per_word)
 
     _set_page_flow_back_button_text("scores", "HOME", MATH_GAME_ORANGE)
     _set_page_flow_back_button_text("keyboard", "BACK", BUTTON_FILL_COLOR)
@@ -2390,6 +3062,9 @@ def init_sd_card(spi, mount_point="/sd"):
 
 
 def read_game_stats():
+    if sd_write_faulted:
+        return dict(DEFAULT_STATS)
+
     try:
         with open(STATS_FILE_PATH, "r") as stats_file:
             return json.loads(stats_file.read())
@@ -2398,12 +3073,19 @@ def read_game_stats():
 
 
 def save_game_stats(stats):
+    global sd_write_faulted
+
+    if sd_write_faulted:
+        print("Stats save skipped: SD write faulted")
+        return False
+
     try:
         with open(STATS_FILE_PATH, "w") as stats_file:
             stats_file.write(json.dumps(stats))
         print("Stats saved: {}".format(stats))
         return True
     except Exception as exc:
+        sd_write_faulted = True
         print("Stats save failed: {}".format(exc))
         return False
 
@@ -2468,6 +3150,7 @@ def show_page(page_name):
 def handle_button_press(button):
     global answer_display_text, startup_player_page, startup_step, startup_new_player_text
     global game_active, game_word_index, game_total, game_correct, game_correct_total, game_current_word_wrong_attempts
+    global game_total_guesses, game_first_try_correct_count
 
     play_button_feedback()
 
@@ -2485,6 +3168,12 @@ def handle_button_press(button):
         return
 
     if button["role"] == "flow_next" and current_page_name == "main":
+        if startup_step == STARTUP_STEP_READY:
+            next_page = _summary_page_next("main")
+            refresh_start_summary_page(next_page)
+            show_page(next_page)
+            update_status_line(force=True)
+            return
         if startup_step == STARTUP_STEP_PLAYER:
             max_page = (len(startup_player_names) - 1) // 3
             if startup_player_page < max_page:
@@ -2501,6 +3190,52 @@ def handle_button_press(button):
                 _goto_previous_startup_step()
         elif startup_step != STARTUP_STEP_READY:
             _goto_previous_startup_step()
+        return
+
+    if button["role"] == "flow_next" and current_page_name == SUMMARY_PAGE_GPW:
+        next_player = summary_gpw_current_player_index + 1
+        if next_player < len(startup_player_names):
+            refresh_gpw_page(next_player)
+        else:
+            next_page = _summary_page_next(SUMMARY_PAGE_GPW)
+            if next_page != "main":
+                refresh_start_summary_page(next_page)
+            show_page(next_page)
+            if next_page == "main":
+                update_startup_ui()
+        update_status_line(force=True)
+        return
+
+    if button["role"] == "flow_back" and current_page_name == SUMMARY_PAGE_GPW:
+        prev_player = summary_gpw_current_player_index - 1
+        if prev_player >= 0:
+            refresh_gpw_page(prev_player)
+        else:
+            prev_page = _summary_page_prev(SUMMARY_PAGE_GPW)
+            if prev_page != "main":
+                refresh_start_summary_page(prev_page)
+            show_page(prev_page)
+            if prev_page == "main":
+                update_startup_ui()
+        update_status_line(force=True)
+        return
+
+    if button["role"] == "flow_next" and current_page_name in (SUMMARY_PAGE_LPS_PICTURE, SUMMARY_PAGE_LPS_SOUND, SUMMARY_PAGE_FIRST_TRY):
+        next_page = _summary_page_next(current_page_name)
+        if next_page != "main":
+            refresh_start_summary_page(next_page)
+        show_page(next_page)
+        update_status_line(force=True)
+        return
+
+    if button["role"] == "flow_back" and current_page_name in (SUMMARY_PAGE_LPS_PICTURE, SUMMARY_PAGE_LPS_SOUND, SUMMARY_PAGE_FIRST_TRY):
+        prev_page = _summary_page_prev(current_page_name)
+        if prev_page != "main":
+            refresh_start_summary_page(prev_page)
+        show_page(prev_page)
+        if prev_page == "main":
+            update_startup_ui()
+        update_status_line(force=True)
         return
 
     if button["role"] == "flow_back" and current_page_name == "name_entry":
@@ -2610,10 +3345,14 @@ def handle_button_press(button):
     elif key_text == "ENTER":
         expected_answer = current_prompt_answer()
         typed_answer = answer_display_text.lower()
+        if game_active and expected_answer and typed_answer:
+            game_total_guesses += 1
         if expected_answer and typed_answer == expected_answer:
             print("Correct: {} ({})".format(typed_answer, _gameplay_memory_text()))
             if game_active:
                 game_correct_total += 1
+                if game_current_word_wrong_attempts == 0 and not game_current_word_hint_used:
+                    game_first_try_correct_count += 1
                 if not game_current_word_hint_used:
                     game_correct += 1
                 set_gameplay_np_color(NP_CORRECT_GREEN)
@@ -2699,6 +3438,10 @@ def main():
     tick_startup_progress_leds()
     pages.add_content(build_keyboard_page(), page_name="keyboard")
     pages.add_content(build_scores_page(), page_name="scores")
+    pages.add_content(build_summary_lps_picture_page(), page_name=SUMMARY_PAGE_LPS_PICTURE)
+    pages.add_content(build_summary_lps_sound_page(), page_name=SUMMARY_PAGE_LPS_SOUND)
+    pages.add_content(build_summary_first_try_page(), page_name=SUMMARY_PAGE_FIRST_TRY)
+    pages.add_content(build_summary_gpw_page(), page_name=SUMMARY_PAGE_GPW)
     tick_startup_progress_leds()
     load_player_names()
     time.sleep(.05)
