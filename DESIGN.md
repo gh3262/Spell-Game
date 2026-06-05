@@ -1,12 +1,20 @@
 # Spelling Game (Touchscreen Edition)
 
 ## Overview
-A spelling game for a 4" 480x320 TFT touchscreen, currently running in portrait mode, using touch input with two active prompt modes: Picture and Audio. The current build includes a working page-based UI, touch keyboard, SD-backed image and WAV prompt loading, and gameplay feedback audio.
+A spelling game for a 4" 480x320 TFT touchscreen, currently running in portrait mode, using touch input with two active prompt modes: Picture and Audio. The current build includes a working page-based UI, touch keyboard, manifest-first image/WAV prompt loading with SD fallback, and gameplay feedback audio.
 
 Active runtime asset locations on SD card:
 - Picture prompts: `/sd/imgs/*.bmp`
 - Audio prompts: `/sd/wavs/*.wav`
     - Underscore-prefixed WAVs are reserved for startup/system use and are excluded from gameplay prompt loading.
+
+Primary gameplay prompt index sources (board root):
+- `pictures.py` (`PICTURES_BY_LENGTH`)
+- `sounds.py` (`SOUNDS_BY_LENGTH`)
+
+Runtime behavior:
+- Manifest indexes are preferred for gameplay prompt loading.
+- If manifest import/shape/contents are invalid, runtime falls back to SD directory scans.
 
 Runtime data files on SD card root:
 - `/sd/players.txt` (current active player list)
@@ -32,7 +40,7 @@ Repository sample data files:
 - Replay button is implemented on the keyboard page for Audio mode.
 - SD card support is wired for CS `D12` and mounts at `/sd` in the current build.
 - RTC-driven status text is active; when the DS3231 is absent, boot falls back to `2026-01-01 13:00:00`.
-- Persistent scores/stats and full game-engine integration are still pending.
+- Summary pages now use a dynamic lifecycle: unload during startup/gameplay flow and rebuild on demand when summary views are opened.
 
 ## Session Updates (2026-05-19)
 - Startup flow now supports staged configuration before play:
@@ -69,8 +77,20 @@ Repository sample data files:
 - Recovery now includes a template-read guard so missing `/tplayers.txt` does not trigger unnecessary restore-write errors.
 - Branching workflow note: features can be iterated on one hardware platform first and back-ported after validation.
 
+## Session Updates (2026-06-05)
+- Ported gameplay indexing updates from alternate hardware branch into this project.
+- Prompt lists now prefer static manifest modules (`pictures.py`, `sounds.py`) rather than scanning all SD assets each load.
+- Added manifest path normalization and filtering safeguards:
+    - accepted length buckets (`3`, `4`, `5`, `6+`)
+    - file suffix enforcement (`.bmp` / `.wav`)
+    - reserved underscore-prefix exclusion
+    - stable sorting before flattened list build
+- Added dynamic summary-page load/unload behavior to reduce memory pressure affecting audio stability during gameplay.
+- Hardware mappings and device bring-up paths were intentionally not changed as part of this port.
+
 ## Deployment Checklist
 1. Save and deploy updated `code.py` to board root.
+    - Deploy updated `pictures.py` and `sounds.py` to board root when changed.
 2. Verify `lib/` contains required runtime modules used by current code paths:
     - `adafruit_bitmap_font.bitmap_font`
     - `adafruit_display_text`
@@ -87,16 +107,19 @@ Repository sample data files:
     - `/sd/wavs/*.wav`
 4. Verify board-root template file exists:
     - `/tplayers.txt`
-5. Boot validation:
+5. Verify board-root gameplay manifest files exist:
+    - `/pictures.py`
+    - `/sounds.py`
+6. Boot validation:
     - RTC init logs expected state
     - SD mounts without retries/failures
     - Display init completes without CS pin conflicts
     - UI scaffold initializes (`main`, `keyboard`, `scores`)
     - One reserved startup WAV plays
-6. Gameplay validation:
+7. Gameplay validation:
     - Picture mode uses randomized round list and stops at selected word count
     - Audio mode plays one prompt per word (no duplicate play), advances correctly, and respects round limit
-7. Before push:
+8. Before push:
     - Remove or reduce temporary debug prints not needed for field diagnostics
     - Confirm README/DESIGN notes reflect current behavior
 
@@ -188,6 +211,7 @@ Repository sample data files:
 - Page-based UI scaffold
 - BMP image loading from `/sd/imgs`
 - WAV audio prompt loading from `/sd/wavs`
+- Manifest-first prompt indexing from board-root `pictures.py` / `sounds.py` with SD fallback
 - Reserved `_*.wav` files excluded from gameplay prompt selection
 - Filename-based spelling checks (image mode and audio mode)
 - Flow buttons for navigation
@@ -200,6 +224,7 @@ Repository sample data files:
 
 ## Assets
 - Prompt assets are expected on the SD card at `/sd/imgs` and `/sd/wavs`
+- Prompt manifests are expected on board root as `pictures.py` and `sounds.py`
 - Images should be 120x120 .bmp files
 - Audio prompt files should be `.wav`; underscore-prefixed WAVs are treated as reserved system assets and excluded from gameplay prompt rotation
 - Reserved audio-mode speaker image is currently loaded from SD candidates: `/sd/img/_audio.bmp` then `/sd/imgs/_audio.bmp`
@@ -224,6 +249,22 @@ Repo-side sample files for SD root data:
 - `files/tplayers.txt`
 - `files/scores.txt`
 
+## Troubleshooting (Manifest Loading)
+- Symptom: No prompts loaded from manifests.
+    - Confirm board-root files exist: `/pictures.py`, `/sounds.py`.
+    - Confirm exported names are exact: `PICTURES_BY_LENGTH`, `SOUNDS_BY_LENGTH`.
+    - Confirm manifest values are dictionaries of lists/tuples.
+- Symptom: Some manifest entries do not appear in gameplay lists.
+    - Only `.bmp` entries are accepted for pictures and `.wav` for sounds.
+    - Underscore-prefixed filenames are intentionally excluded from gameplay prompt pools.
+    - Invalid bucket keys are ignored; use `"3"`, `"4"`, `"5"`, `"6+"`.
+- Symptom: Runtime appears to ignore manifests and use SD scan ordering.
+    - This indicates manifest import/validation fallback occurred.
+    - Re-check syntax and runtime validity of board copies of `pictures.py` and `sounds.py`.
+- Symptom: Prompt asset fails when selected during gameplay.
+    - Verify the manifest path exactly matches an existing SD file path.
+    - Verify SD mount is healthy and `/sd/imgs` and `/sd/wavs` are readable.
+
 ## Future Ideas
 - More game modes
 - Multiplayer support
@@ -240,6 +281,8 @@ Repo-side sample files for SD root data:
 
 ## File Structure
 - **code.py**: Main entry point, UI, and game flow
+- **pictures.py**: Static picture prompt manifest (`PICTURES_BY_LENGTH`)
+- **sounds.py**: Static audio prompt manifest (`SOUNDS_BY_LENGTH`)
 - **game_engine.py**: Game state and logic
 - **logic_core.py**: Core logic for spelling, scoring, etc.
 - **adapters.py**: Hardware abstraction

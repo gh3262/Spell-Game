@@ -247,6 +247,12 @@ SUMMARY_PAGE_ORDER = (
     SUMMARY_PAGE_FIRST_TRY,
     SUMMARY_PAGE_GPW,
 )
+SUMMARY_DYNAMIC_PAGES = (
+    SUMMARY_PAGE_LPS_PICTURE,
+    SUMMARY_PAGE_LPS_SOUND,
+    SUMMARY_PAGE_FIRST_TRY,
+    SUMMARY_PAGE_GPW,
+)
 
 STATS_FILE_PATH = "/sd/stats.json"
 DEFAULT_STATS = {"total_games": 0, "total_correct": 0, "high_score": 0, "total_time": 0.0, "total_guesses": 0}
@@ -338,6 +344,13 @@ summary_first_try_labels = []
 summary_gpw_player_label = None
 summary_gpw_row_labels = []
 summary_gpw_current_player_index = 0
+summary_lps_picture_page_group = None
+summary_lps_sound_page_group = None
+summary_first_try_page_group = None
+summary_gpw_page_group = None
+summary_registered_buttons = []
+summary_registered_status_labels = []
+summary_pages_initialized = False
 
 
 def _normalize_player_name(name_text):
@@ -700,6 +713,7 @@ def update_startup_ui():
 def begin_startup_flow():
     global startup_step, startup_player_page, startup_name_entry_page, startup_new_player_text
 
+    _unload_summary_pages()
     startup_step = STARTUP_STEP_PLAYER
     startup_player_page = 0
     startup_name_entry_page = 0
@@ -1446,8 +1460,101 @@ def _length_bucket_for_answer(answer_text):
     return "6+"
 
 
+def _empty_length_buckets():
+    return {"3": [], "4": [], "5": [], "6+": []}
+
+
+def _normalized_bucket_key(bucket_key):
+    key_text = str(bucket_key).strip()
+    if key_text in ("6", "6+"):
+        return "6+"
+    if key_text in ("3", "4", "5"):
+        return key_text
+    return None
+
+
+def _normalize_manifest_paths(manifest_map, required_suffix):
+    normalized = _empty_length_buckets()
+    if not isinstance(manifest_map, dict):
+        return None
+
+    suffix_text = required_suffix.lower()
+    for key_text in manifest_map:
+        bucket_key = _normalized_bucket_key(key_text)
+        if bucket_key is None:
+            continue
+
+        bucket_items = manifest_map.get(key_text)
+        if not isinstance(bucket_items, (list, tuple)):
+            continue
+
+        for candidate in bucket_items:
+            if not isinstance(candidate, str):
+                continue
+            path_text = candidate.strip()
+            if not path_text:
+                continue
+            if not path_text.lower().endswith(suffix_text):
+                continue
+
+            file_name = path_text.split("/")[-1]
+            if file_name.startswith("_"):
+                continue
+
+            normalized[bucket_key].append(path_text)
+
+    total_count = 0
+    for bucket in normalized:
+        total_count += len(normalized[bucket])
+    if total_count <= 0:
+        return None
+
+    for bucket in normalized:
+        normalized[bucket].sort()
+    return normalized
+
+
+def _flatten_bucket_map(bucket_map):
+    return bucket_map["3"] + bucket_map["4"] + bucket_map["5"] + bucket_map["6+"]
+
+
+def _load_manifest_bucket_map(module_name, attr_name, required_suffix):
+    try:
+        module_obj = __import__(module_name)
+    except Exception:
+        return None
+
+    try:
+        raw_map = getattr(module_obj, attr_name)
+    except Exception:
+        return None
+
+    return _normalize_manifest_paths(raw_map, required_suffix)
+
+
 def load_keyboard_image_paths(folder_path="/img"):
     global keyboard_image_paths, keyboard_image_index, keyboard_image_paths_by_length
+
+    manifest_buckets = _load_manifest_bucket_map("pictures", "PICTURES_BY_LENGTH", ".bmp")
+    if manifest_buckets is not None:
+        keyboard_image_paths_by_length = manifest_buckets
+        keyboard_image_paths = _flatten_bucket_map(manifest_buckets)
+        keyboard_image_index = 0
+
+        if not keyboard_image_paths:
+            print("Picture manifest loaded but empty")
+            return False
+
+        print("Loaded {} keyboard images from pictures.py manifest".format(len(keyboard_image_paths)))
+        print(
+            "Image length buckets 3:{} 4:{} 5:{} 6+:{}".format(
+                len(keyboard_image_paths_by_length["3"]),
+                len(keyboard_image_paths_by_length["4"]),
+                len(keyboard_image_paths_by_length["5"]),
+                len(keyboard_image_paths_by_length["6+"]),
+            )
+        )
+        return True
 
     try:
         names = os.listdir(folder_path)
@@ -1465,7 +1572,7 @@ def load_keyboard_image_paths(folder_path="/img"):
 
     bmp_names.sort()
     keyboard_image_paths = ["{}/{}".format(folder_path, name) for name in bmp_names]
-    keyboard_image_paths_by_length = {"3": [], "4": [], "5": [], "6+": []}
+    keyboard_image_paths_by_length = _empty_length_buckets()
     for image_path in keyboard_image_paths:
         answer_text = _answer_from_asset_path(image_path)
         length_bucket = _length_bucket_for_answer(answer_text)
@@ -1495,6 +1602,27 @@ def load_keyboard_image_paths(folder_path="/img"):
 def load_audio_word_paths(folder_path=AUDIO_WORDS_DIR):
     global audio_word_paths, audio_word_index, audio_word_paths_by_length
 
+    manifest_buckets = _load_manifest_bucket_map("sounds", "SOUNDS_BY_LENGTH", ".wav")
+    if manifest_buckets is not None:
+        audio_word_paths_by_length = manifest_buckets
+        audio_word_paths = _flatten_bucket_map(manifest_buckets)
+        audio_word_index = 0
+
+        if not audio_word_paths:
+            print("Sound manifest loaded but empty")
+            return False
+
+        print("Loaded {} audio prompts from sounds.py manifest".format(len(audio_word_paths)))
+        print(
+            "Audio length buckets 3:{} 4:{} 5:{} 6+:{}".format(
+                len(audio_word_paths_by_length["3"]),
+                len(audio_word_paths_by_length["4"]),
+                len(audio_word_paths_by_length["5"]),
+                len(audio_word_paths_by_length["6+"]),
+            )
+        )
+        return True
+
     try:
         names = os.listdir(folder_path)
     except Exception as exc:
@@ -1510,7 +1638,7 @@ def load_audio_word_paths(folder_path=AUDIO_WORDS_DIR):
 
     wav_names.sort()
     audio_word_paths = ["{}/{}".format(folder_path, name) for name in wav_names]
-    audio_word_paths_by_length = {"3": [], "4": [], "5": [], "6+": []}
+    audio_word_paths_by_length = _empty_length_buckets()
     for wav_path in audio_word_paths:
         answer_text = _answer_from_asset_path(wav_path)
         length_bucket = _length_bucket_for_answer(answer_text)
@@ -1996,7 +2124,8 @@ def _load_score_records():
 
 
 def _set_summary_rows(label_list, row_texts):
-    for index in range(SUMMARY_TOP_COUNT):
+    limit = min(SUMMARY_TOP_COUNT, len(label_list))
+    for index in range(limit):
         if index < len(row_texts):
             label_list[index].text = "{:2d}. {}".format(index + 1, row_texts[index])
         else:
@@ -2054,7 +2183,8 @@ def refresh_first_try_summary(label_list):
 
     ranked.sort(key=lambda item: item[0], reverse=True)
     top = ranked[:SUMMARY_TOP_COUNT]
-    for index in range(SUMMARY_TOP_COUNT):
+    limit = min(SUMMARY_TOP_COUNT, len(label_list))
+    for index in range(limit):
         if index < len(top):
             _, row_text, is_sound = top[index]
             label_list[index].text = "{:2d}. {}".format(index + 1, row_text)
@@ -2164,6 +2294,8 @@ def refresh_gpw_page(player_index):
 
 
 def refresh_start_summary_page(page_name):
+    _add_summary_pages_if_needed()
+
     if page_name == SUMMARY_PAGE_LPS_PICTURE:
         refresh_best_seconds_per_letter("picture", summary_lps_picture_labels)
         return
@@ -2448,6 +2580,8 @@ def add_button(
         "y1": y + h,
     }
     BUTTON_REGISTRY.append(button_info)
+    if page_name in SUMMARY_DYNAMIC_PAGES:
+        summary_registered_buttons.append(button_info)
     return button_info
 
 
@@ -2484,6 +2618,8 @@ def add_shared_page_chrome(page_group, page_name):
     status_line.anchored_position = (DISPLAY_WIDTH // 2, STATUS_LINE_Y)
     page_group.append(status_line)
     STATUS_LINE_LABELS.append(status_line)
+    if page_name in SUMMARY_DYNAMIC_PAGES:
+        summary_registered_status_labels.append(status_line)
 
 
 def build_main_page():
@@ -2856,70 +2992,151 @@ def _build_summary_page_rows(page, page_name):
     return rows
 
 
-def build_summary_lps_picture_page():
+def _add_summary_pages_if_needed():
+    global summary_pages_initialized
+
+    if not summary_pages_initialized:
+        summary_pages_initialized = all(page_group is not None for page_group in _summary_groups())
+
+    if not summary_pages_initialized:
+        return
+
+    if not _summary_pages_have_content():
+        _rebuild_summary_pages_in_place()
+
+
+def _summary_groups():
+    return (
+        summary_lps_picture_page_group,
+        summary_lps_sound_page_group,
+        summary_first_try_page_group,
+        summary_gpw_page_group,
+    )
+
+
+def _summary_pages_have_content():
+    for page_group in _summary_groups():
+        if page_group is not None and len(page_group) > 0:
+            return True
+    return False
+
+
+def _clear_group_children(page_group):
+    if page_group is None:
+        return
+    while len(page_group) > 0:
+        page_group.pop()
+
+
+def _rebuild_summary_pages_in_place():
+    _clear_group_children(summary_lps_picture_page_group)
+    _clear_group_children(summary_lps_sound_page_group)
+    _clear_group_children(summary_first_try_page_group)
+    _clear_group_children(summary_gpw_page_group)
+
+    _populate_summary_lps_picture_page(summary_lps_picture_page_group)
+    _populate_summary_lps_sound_page(summary_lps_sound_page_group)
+    _populate_summary_first_try_page(summary_first_try_page_group)
+    _populate_summary_gpw_page(summary_gpw_page_group)
+    gc.collect()
+    print("Summary pages rebuilt in place ({})".format(_gameplay_memory_text()))
+
+
+def _unload_summary_pages():
+    global summary_lps_picture_labels, summary_lps_sound_labels, summary_first_try_labels
+    global summary_gpw_player_label, summary_gpw_row_labels
+    global summary_registered_buttons, summary_registered_status_labels, summary_pages_initialized
+
+    if not summary_pages_initialized:
+        summary_pages_initialized = all(page_group is not None for page_group in _summary_groups())
+
+    if not summary_pages_initialized:
+        return
+    if not _summary_pages_have_content():
+        return
+
+    _clear_group_children(summary_lps_picture_page_group)
+    _clear_group_children(summary_lps_sound_page_group)
+    _clear_group_children(summary_first_try_page_group)
+    _clear_group_children(summary_gpw_page_group)
+
+    if summary_registered_buttons:
+        for button_info in summary_registered_buttons:
+            if button_info in BUTTON_REGISTRY:
+                BUTTON_REGISTRY.remove(button_info)
+    if summary_registered_status_labels:
+        for status_label in summary_registered_status_labels:
+            if status_label in STATUS_LINE_LABELS:
+                STATUS_LINE_LABELS.remove(status_label)
+    summary_registered_buttons = []
+    summary_registered_status_labels = []
+
+    summary_lps_picture_labels = []
+    summary_lps_sound_labels = []
+    summary_first_try_labels = []
+    summary_gpw_player_label = None
+    summary_gpw_row_labels = []
+    gc.collect()
+    print("Summary pages unloaded")
+
+
+def _populate_summary_lps_picture_page(page_group):
     global summary_lps_picture_labels
 
-    page = displayio.Group()
-    add_background(page)
-    add_shared_page_chrome(page, SUMMARY_PAGE_LPS_PICTURE)
+    add_background(page_group)
+    add_shared_page_chrome(page_group, SUMMARY_PAGE_LPS_PICTURE)
 
     header = label.Label(FONTS["button"], text="Best Sec/Ltr - Pic", color=TITLE_TEXT_COLOR)
     header.anchor_point = (0.5, 0.5)
     header.anchored_position = (DISPLAY_WIDTH // 2, 95)
-    page.append(header)
+    page_group.append(header)
 
-    summary_lps_picture_labels = _build_summary_page_rows(page, SUMMARY_PAGE_LPS_PICTURE)
-    return page
+    summary_lps_picture_labels = _build_summary_page_rows(page_group, SUMMARY_PAGE_LPS_PICTURE)
 
 
-def build_summary_lps_sound_page():
+def _populate_summary_lps_sound_page(page_group):
     global summary_lps_sound_labels
 
-    page = displayio.Group()
-    add_background(page)
-    add_shared_page_chrome(page, SUMMARY_PAGE_LPS_SOUND)
+    add_background(page_group)
+    add_shared_page_chrome(page_group, SUMMARY_PAGE_LPS_SOUND)
 
     header = label.Label(FONTS["button"], text="Best Sec/Ltr - Snd", color=TITLE_TEXT_COLOR)
     header.anchor_point = (0.5, 0.5)
     header.anchored_position = (DISPLAY_WIDTH // 2, 95)
-    page.append(header)
+    page_group.append(header)
 
-    summary_lps_sound_labels = _build_summary_page_rows(page, SUMMARY_PAGE_LPS_SOUND)
-    return page
+    summary_lps_sound_labels = _build_summary_page_rows(page_group, SUMMARY_PAGE_LPS_SOUND)
 
 
-def build_summary_first_try_page():
+def _populate_summary_first_try_page(page_group):
     global summary_first_try_labels
 
-    page = displayio.Group()
-    add_background(page)
-    add_shared_page_chrome(page, SUMMARY_PAGE_FIRST_TRY)
+    add_background(page_group)
+    add_shared_page_chrome(page_group, SUMMARY_PAGE_FIRST_TRY)
 
     header = label.Label(FONTS["button"], text="Top First Try %", color=TITLE_TEXT_COLOR)
     header.anchor_point = (0.5, 0.5)
     header.anchored_position = (DISPLAY_WIDTH // 2, 95)
-    page.append(header)
+    page_group.append(header)
 
-    summary_first_try_labels = _build_summary_page_rows(page, SUMMARY_PAGE_FIRST_TRY)
-    return page
+    summary_first_try_labels = _build_summary_page_rows(page_group, SUMMARY_PAGE_FIRST_TRY)
 
 
-def build_summary_gpw_page():
+def _populate_summary_gpw_page(page_group):
     global summary_gpw_player_label, summary_gpw_row_labels
 
-    page = displayio.Group()
-    add_background(page)
-    add_shared_page_chrome(page, SUMMARY_PAGE_GPW)
+    add_background(page_group)
+    add_shared_page_chrome(page_group, SUMMARY_PAGE_GPW)
 
     title_lbl = label.Label(FONTS["button"], text="Guesses Per Word", color=TITLE_TEXT_COLOR)
     title_lbl.anchor_point = (0.5, 0.5)
     title_lbl.anchored_position = (DISPLAY_WIDTH // 2, 55)
-    page.append(title_lbl)
+    page_group.append(title_lbl)
 
     summary_gpw_player_label = label.Label(FONTS["score"], text="---", color=STATUS_TEXT_COLOR)
     summary_gpw_player_label.anchor_point = (0.5, 0.5)
     summary_gpw_player_label.anchored_position = (DISPLAY_WIDTH // 2, 82)
-    page.append(summary_gpw_player_label)
+    page_group.append(summary_gpw_player_label)
 
     row_y_positions = (104, 128, 152, 176, 200, 224, 248, 272)
     summary_gpw_row_labels = []
@@ -2927,9 +3144,43 @@ def build_summary_gpw_page():
         row_lbl = label.Label(FONTS["small_button"], text="-", color=STATUS_TEXT_COLOR)
         row_lbl.anchor_point = (0.0, 0.5)
         row_lbl.anchored_position = (12, row_y)
-        page.append(row_lbl)
+        page_group.append(row_lbl)
         summary_gpw_row_labels.append(row_lbl)
 
+
+def build_summary_lps_picture_page():
+    global summary_lps_picture_page_group
+
+    page = displayio.Group()
+    summary_lps_picture_page_group = page
+    _populate_summary_lps_picture_page(page)
+    return page
+
+
+def build_summary_lps_sound_page():
+    global summary_lps_sound_page_group
+
+    page = displayio.Group()
+    summary_lps_sound_page_group = page
+    _populate_summary_lps_sound_page(page)
+    return page
+
+
+def build_summary_first_try_page():
+    global summary_first_try_page_group
+
+    page = displayio.Group()
+    summary_first_try_page_group = page
+    _populate_summary_first_try_page(page)
+    return page
+
+
+def build_summary_gpw_page():
+    global summary_gpw_page_group
+
+    page = displayio.Group()
+    summary_gpw_page_group = page
+    _populate_summary_gpw_page(page)
     return page
 
 
@@ -3143,6 +3394,10 @@ def button_from_touch(x, y):
 
 def show_page(page_name):
     global current_page_name
+
+    if page_name in SUMMARY_PAGE_ORDER and page_name != "main":
+        _add_summary_pages_if_needed()
+
     pages.show_page(page_name)
     current_page_name = page_name
 

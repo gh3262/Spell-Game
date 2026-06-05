@@ -5,7 +5,7 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
 ## Quick Start
 1. Install CircuitPython on your Feather RP2040.
 2. Copy project files to the device:
-    - code.py, adapters.py, game_engine.py, logic_core.py, settings.toml
+    - code.py, pictures.py, sounds.py, adapters.py, game_engine.py, logic_core.py, settings.toml
     - lib/ (required libraries)
     - fonts/ (bitmap fonts)
     - files/ (player and score data)
@@ -20,6 +20,10 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
         - Runtime template file on board root:
             - `/tplayers.txt` (template players used to heal missing/empty `/sd/players.txt`)
         - Sample copies for these text files are in repo folder: `files/`
+                - Gameplay prompt manifests are loaded from:
+                        - `pictures.py` (`PICTURES_BY_LENGTH`)
+                        - `sounds.py` (`SOUNDS_BY_LENGTH`)
+                    If a manifest import or parse fails, runtime falls back to SD directory scanning.
 4. Reset the board and verify the title screen appears.
 
 ## Expected SD Card Layout
@@ -63,9 +67,20 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
 - Restore path now includes a guard: if `/tplayers.txt` cannot be read, restore is skipped and normal fallback behavior continues.
 - Ongoing workflow note: gameplay improvements may land on one hardware platform first, then get ported to the other after validation.
 
+## Session Updates (2026-06-05)
+- Ported gameplay-side prompt indexing from alternate hardware branch: image/audio prompt lists now load from `pictures.py` and `sounds.py` manifests first.
+- Added manifest safety normalization (bucket key cleanup, suffix filtering, reserved underscore file exclusion, and sorted bucket flattening).
+- SD folder scans remain as fallback when manifest modules are unavailable or invalid.
+- Ported dynamic summary-page memory handling:
+    - Summary pages are unloaded at startup-flow begin to reduce display-object memory pressure during active gameplay/audio.
+    - Summary pages are rebuilt on demand when navigating to summary views.
+    - Summary page buttons/status labels are re-registered and removed cleanly on rebuild/unload cycles.
+- Hardware-specific paths (pins, touch/display/audio bring-up) were intentionally left unchanged.
+
 ## Deployment Checklist
 1. Confirm local `code.py` saves cleanly and contains no syntax errors.
 2. Copy updated app code to the board (`D:\code.py`).
+    - Also copy `pictures.py` and `sounds.py` when updated.
 3. Verify required libraries exist on device `lib/`:
     - `adafruit_bitmap_font`
     - `adafruit_display_text`
@@ -84,15 +99,18 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
     - `/sd/imgs/*.bmp`
     - `/sd/wavs/*.wav`
     - Reserved startup/system clips may exist as `/sd/wavs/_*.wav`; these are excluded from gameplay prompt lists
-7. Hardware sanity check after reboot:
+7. Verify manifest files are present on the board root:
+    - `/pictures.py`
+    - `/sounds.py`
+8. Hardware sanity check after reboot:
     - Display initializes
     - Touch responds
     - One startup `_start*.wav` clip plays
     - RTC initializes (or logs a clear fallback message)
-8. Functional smoke test:
+9. Functional smoke test:
     - Picture mode: select 10 words, confirm randomized list behavior and stop at 10
     - Audio mode: confirm no duplicate prompt playback and prompt advances correctly
-9. Optional pre-push cleanup:
+10. Optional pre-push cleanup:
     - Reduce debug logging volume if no longer needed
     - Keep only diagnostics needed for field troubleshooting
 
@@ -119,8 +137,28 @@ A spelling game for a 4" 480x320 TFT touchscreen, using audio and visual cues to
     - Confirm replay button still plays prompt on demand
 7. If all checks pass, deploy/push is green.
 
+## Troubleshooting (Manifest Loading)
+- Symptom: Prompt lists are unexpectedly small or empty at startup.
+    - Check that board-root `pictures.py` and `sounds.py` are present.
+    - Verify manifest variable names are exact:
+        - `PICTURES_BY_LENGTH` in `pictures.py`
+        - `SOUNDS_BY_LENGTH` in `sounds.py`
+    - Confirm buckets use keys: `"3"`, `"4"`, `"5"`, `"6+"`.
+- Symptom: Specific prompt entries are ignored.
+    - Ensure picture paths end with `.bmp` and sound paths end with `.wav`.
+    - Entries with underscore-prefixed filenames are intentionally excluded from gameplay lists.
+    - Non-string entries are ignored by the manifest normalizer.
+- Symptom: Manifest appears valid but runtime still scans SD folders.
+    - A manifest import/shape error triggers automatic fallback to SD directory scanning.
+    - Confirm there are no syntax/runtime errors in board copies of `pictures.py` or `sounds.py`.
+- Symptom: Prompt files listed in manifest fail during gameplay.
+    - Verify each listed file actually exists on SD at the same absolute path used in manifest entries.
+    - Validate SD card mount and readability (`/sd/imgs`, `/sd/wavs`).
+
 ## Project Structure
 - code.py: Main entry point, UI, and game flow
+- pictures.py: Static image prompt manifest (`PICTURES_BY_LENGTH`)
+- sounds.py: Static audio prompt manifest (`SOUNDS_BY_LENGTH`)
 - game_engine.py: Game state and logic
 - logic_core.py: Core logic for spelling, scoring, etc.
 - adapters.py: Hardware abstraction
